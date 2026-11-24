@@ -1,0 +1,26 @@
+# Executáveis gerados pela compilação
+/compilador
+/compilador.exe
+*.exe
+*.out
+
+# Arquivos intermediários de compilação
+*.o
+*.obj
+*.a
+
+# Arquivos temporários
+*.tmp
+*.log
+*~
+
+# Configurações locais do VS Code
+.vscode/
+
+# Cache do Python
+__pycache__/
+*.pyc
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
