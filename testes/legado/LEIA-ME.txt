@@ -1,0 +1,1 @@
+Estes arquivos foram preservados do projeto anterior para referencia e testes de reconhecimento lexico/sintatico. O TesteCompleto.java usa funcionalidades avancadas (lambdas, referencias de metodo, generics, entre outras) que nao sao aceitas pela AST/analise semantica do subconjunto atual. Para a apresentacao, use os casos da pasta testes/ e siga o README na raiz.

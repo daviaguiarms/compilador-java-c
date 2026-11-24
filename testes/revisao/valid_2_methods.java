@@ -1,0 +1,1 @@
+class T { static int add(int a,int b){return a+b;} public static void main(String[] args){int x=add(1,2);System.out.println(x);} }
