@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<launchConfiguration type="org.eclipse.cdt.launch.applicationLaunchType">
+    <stringAttribute key="org.eclipse.cdt.launch.PROGRAM_ARGUMENTS" value="testes/Valido.java"/>
+    <stringAttribute key="org.eclipse.cdt.launch.PROGRAM_NAME" value="compilador.exe"/>
+    <stringAttribute key="org.eclipse.cdt.launch.PROJECT_ATTR" value="compilador"/>
+    <stringAttribute key="org.eclipse.cdt.launch.WORKING_DIRECTORY" value="${workspace_loc:/compilador}"/>
+    <listAttribute key="org.eclipse.debug.core.MAPPED_RESOURCE_PATHS">
+        <listEntry value="/compilador"/>
+    </listAttribute>
+    <listAttribute key="org.eclipse.debug.core.MAPPED_RESOURCE_TYPES">
+        <listEntry value="4"/>
+    </listAttribute>
+    <stringAttribute key="process_factory_id" value="org.eclipse.cdt.dsf.gdb.GdbProcessFactory"/>
+</launchConfiguration>
