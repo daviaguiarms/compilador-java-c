@@ -1,5 +1,9 @@
 # Revisão técnica e testes — 24/11/2026
 
+> Registro histórico anterior à refatoração. A organização e a validação atuais
+> estão em `documentacao/REVISAO_CRITICA.md`; as execuções descritas abaixo não foram
+> todas repetidas na refatoração.
+
 ## Escopo e critério
 
 Revisão do projeto de análise léxica, sintática e semântica em C, para o subconjunto definido de Java, comparando o código com o PDF oficial da disciplina Compiladores. Grupo: Bruno Trindade Friaça Moreira; Davi Aguiar Macedo Santos; Gustavo Costa Nascimento; Lucas Henrique de Souza e Sá. Apresentação: 26/11/2026. A professora autorizou quatro integrantes, segundo confirmação do grupo.

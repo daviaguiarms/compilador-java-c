@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Relatório técnico — Analisador Java em C</title>
+<style>
+@page { size: A4; margin: 18mm 18mm 20mm; }
+body { margin: 0; color: #202020; font: 10.5pt/1.4 Arial, sans-serif; }
+.pagina { height: 250mm; box-sizing: border-box; position: relative; break-after: page; }
+.pagina:last-child { break-after: auto; }
+h1 { font-size: 23pt; margin: 0 0 8mm; }
+h2 { font-size: 17pt; margin: 0 0 6mm; }
+h3 { font-size: 12pt; margin: 5mm 0 2mm; }
+p { margin: 0 0 3mm; }
+ul, ol { padding-left: 6mm; margin: 2mm 0 4mm; }
+li { margin-bottom: 1.5mm; }
+pre { white-space: pre-wrap; font: 8.5pt/1.35 Consolas, monospace; margin: 3mm 0; }
+code { font-family: Consolas, monospace; font-size: 9pt; }
+table { width: 100%; border-collapse: collapse; margin: 4mm 0; font-size: 9.5pt; }
+th, td { text-align: left; border: 1px solid #999; padding: 2mm; }
+footer { position: absolute; bottom: 0; right: 0; color: #555; font-size: 9pt; }
+.capa { padding-top: 22mm; }
+</style>
+</head>
+<body>
+<section class="pagina capa">
+<p>Universidade FUMEC — Ciência da Computação</p>
+<h1>Analisador léxico, sintático e semântico de Java em C</h1>
+<p><strong>Disciplina:</strong> Compiladores</p>
+<p><strong>Professora:</strong> Amanda Danielle Lima de Oliveira</p>
+<p><strong>Integrantes do grupo Java, conforme a tabela do enunciado:</strong></p>
+<ul>
+<li>Bruno Trindade Friaça Moreira</li>
+<li>Davi Aguiar Macedo Santos</li>
+<li>Gustavo Costa Nascimento</li>
+<li>Lucas Henrique de Souza e Sá</li>
+</ul>
+<p><strong>Data prevista de apresentação e entrega:</strong> 26/11/2026</p>
+<p><strong>Versão deste relatório:</strong> revisão técnica de 26/11/2026</p>
+<h3>1. Objetivo e escopo</h3>
+<p>O programa recebe um arquivo Java por argumento e executa três análises:
+reconhece tokens, verifica a sintaxe e percorre uma árvore sintática abstrata
+(AST) para realizar verificações semânticas básicas. A implementação é manual,
+em C11, sem Lex/Flex nem bibliotecas externas de parsing.</p>
+<p>A sublinguagem permite demonstrar declarações, atribuições, expressões,
+métodos, chamadas, condicionais e laços. Não há execução do programa Java,
+geração de bytecode nem conformidade integral com a especificação Java.</p>
+<p>Esta versão descreve o código após a refatoração e a revisão crítica.
+O relatório antigo da raiz foi preservado como registro histórico.</p>
+<footer>1 / 8</footer>
+</section>
+
+<section class="pagina">
+<h2>2. Organização e análise léxica</h2>
+<table>
+<tr><th>Arquivo</th><th>Responsabilidade</th></tr>
+<tr><td>main.c</td><td>Leitura, participantes, execução das etapas e saída.</td></tr>
+<tr><td>lexer.c / lexer.h</td><td>Scanner manual, tokens, posição e erros léxicos.</td></tr>
+<tr><td>parser.c / parser.h</td><td>Validação sintática e construção da AST do subconjunto.</td></tr>
+<tr><td>ast.c / ast.h</td><td>Nós, filhos, irmãos, impressão indentada e liberação.</td></tr>
+<tr><td>semantic.c / semantic.h</td><td>Tipos, declarações, escopos, argumentos e retornos.</td></tr>
+<tr><td>symbol_table.c / .h</td><td>Tabela hash de identificadores encontrados pelo lexer.</td></tr>
+</table>
+<p><strong>Fluxo:</strong> arquivo → tokens e tabela léxica → validação sintática
+→ construção da AST → verificação semântica → resultado no terminal.</p>
+<p>Erros léxicos impedem a análise sintática; erros sintáticos impedem a AST e a
+semântica. Uma construção aceita pela sintaxe mais ampla, mas não representada
+pela AST, pode produzir erro de subconjunto na etapa semântica.</p>
+<h3>Scanner e estruturas próprias</h3>
+<p>O scanner percorre os bytes do arquivo e reconhece identificadores,
+palavras-chave, números, textos, caracteres, booleanos, null, operadores e
+delimitadores. Espaços e comentários de linha/bloco são consumidos mantendo
+linha e coluna. Operadores são testados do mais longo ao mais curto.</p>
+<p>Tokens e erros são guardados em vetores realocados conforme a necessidade.
+A tabela léxica utiliza 211 baldes e encadeamento por índices para colisões.
+Registra nome, primeira posição e número de ocorrências; não atribui tipos.</p>
+<h3>Escolha do parser</h3>
+<p>A descida recursiva foi mantida por relacionar procedimentos diretamente a
+classes, métodos e instruções. Expressões usam precedência e associatividade.
+O código permanece simples de acompanhar, sem geradores automáticos. A sintaxe
+reconhecida é maior que o núcleo semântico formalizado nas próximas páginas.</p>
+<footer>2 / 8</footer>
+</section>
+
+<section class="pagina">
+<h2>3. Gramática do núcleo — estrutura</h2>
+<p>Notação EBNF: colchetes indicam opção; chaves, repetição; barra vertical,
+alternativa. ID e LITERAL são fornecidos pelo lexer. O núcleo abaixo não é a
+gramática completa de Java nem de todas as extensões toleradas pelo parser.</p>
+<pre>programa = [ pacote ], { importacao }, { classe } ;
+pacote = "package", ID, { ".", ID }, ";" ;
+importacao = "import", [ "static" ], ID,
+             { ".", ID }, [ ".", "*" ], ";" ;
+classe = { modificador }, "class", ID, "{", { membro }, "}" ;
+membro = ";" | { modificador }, tipo, ID, ( metodo | campo ) ;
+metodo = "(", [ parametros ], ")", ( bloco | ";" ) ;
+parametros = tipo, ID, { ",", tipo, ID } ;
+campo = [ "=", expr ], { ",", ID, [ "=", expr ] }, ";" ;
+tipo = tipoBase, { "[", "]" } ;
+tipoBase = primitivo | "String" | ID ;
+primitivo = "int" | "long" | "short" | "byte" | "float"
+          | "double" | "boolean" | "char" | "void" ;
+tipoLocal = ( primitivo | "String" ), { "[", "]" } ;
+modificador = "public" | "private" | "protected" | "static"
+            | "final" | "abstract" | "volatile" | "synchronized" ;
+
+bloco = "{", { instrucao }, "}" ;
+instrucao = bloco | declaracao | condicional | enquanto | para
+          | retorno | expr, ";" | ";" | ( "break" | "continue" ), ";" ;
+declaracao = tipoLocal, ID, [ "=", expr ],
+             { ",", ID, [ "=", expr ] }, ";" ;
+condicional = "if", "(", expr, ")", instrucao,
+              [ "else", instrucao ] ;
+enquanto = "while", "(", expr, ")", instrucao ;
+para = "for", "(", [ inicio ], ";", [ expr ], ";",
+       [ expr ], ")", instrucao ;
+inicio = tipoLocal, ID, [ "=", expr ] | expr ;
+retorno = "return", [ expr ], ";" ;</pre>
+<p><strong>Restrições semânticas:</strong> void não é permitido para variáveis,
+campos ou parâmetros. Condições exigem boolean. Declarações locais nominais,
+listas de inicialização/atualização de for e outras extensões do parser não
+fazem parte do núcleo da AST. Blocos explícitos são recomendados nos exemplos.</p>
+<footer>3 / 8</footer>
+</section>
+
+<section class="pagina">
+<h2>4. Gramática do núcleo — expressões</h2>
+<pre>expr = atribuicao ;
+atribuicao = logicaOu, [ opAtrib, atribuicao ] ;
+opAtrib = "=" | "+=" | "-=" | "*=" | "/=" ;
+logicaOu = logicaE, { "||", logicaE } ;
+logicaE = igualdade, { "&amp;&amp;", igualdade } ;
+igualdade = relacional, { ( "==" | "!=" ), relacional } ;
+relacional = soma, { ( "&lt;" | "&gt;" | "&lt;=" | "&gt;=" ), soma } ;
+soma = produto, { ( "+" | "-" ), produto } ;
+produto = unaria, { ( "*" | "/" | "%" ), unaria } ;
+unaria = ( "!" | "+" | "-" | "++" | "--" ), unaria | posfixa ;
+posfixa = primaria, { ".", ID | "(", [ argumentos ], ")"
+                    | "[", expr, "]" | "++" | "--" } ;
+primaria = LITERAL | ID | "this" | "(", expr, ")" | criacao ;
+argumentos = expr, { ",", expr } ;
+criacao = "new", tipoBase, ( "(", [ argumentos ], ")"
+                           | "[", expr, "]" ) ;</pre>
+<h3>Precedência e associatividade</h3>
+<p>Da menor para a maior: atribuições, ||, &amp;&amp;, igualdade, relações,
+soma/subtração, produto/divisão/resto e operadores unários/pós-fixos.
+Atribuições associam à direita; operadores binários restantes, à esquerda.</p>
+<h3>Restrições de expressões</h3>
+<ul>
+<li>O destino de atribuição/incremento precisa ser modificável; length de
+vetores é somente leitura.</li>
+<li>Operações aritméticas exigem números, exceto concatenação com String.
+Expressões void não são valores utilizáveis nessas operações.</li>
+<li>O núcleo demonstrado usa vetores unidimensionais. Índices e tamanhos
+aceitam int, short, byte ou char.</li>
+<li>Chamadas resolvem métodos da classe corrente: nome simples, this.nome ou
+NomeDaClasse.nome. A distinção completa entre static e instância não é validada.</li>
+<li>System.out.print recebe um argumento; println recebe zero ou um.
+Outras chamadas de membros externos não são resolvidas.</li>
+<li>A sintaxe de new com objetos pode ser representada, mas assinaturas de
+construtores e existência de tipos nominais não são resolvidas integralmente.</li>
+</ul>
+<footer>4 / 8</footer>
+</section>
+
+<section class="pagina">
+<h2>5. AST e verificações semânticas</h2>
+<p>Cada nó guarda categoria, texto, tipo declarado quando aplicável, posição,
+primeiro filho e próximo irmão. O tipo inferido de acessos a vetores é guardado
+no próprio nó, separado do tipo declarado e liberado junto com a árvore.</p>
+<p>Essa separação evita que a inferência de um operando sobrescreva o tipo de
+outro. A impressão continua exibindo as informações estruturais e os tipos
+declarados, sem incluir esse armazenamento auxiliar.</p>
+<h3>Declarações e escopos</h3>
+<p>A análise usa uma lista de símbolos com nome, tipo, categoria, nível de
+escopo e parâmetros de métodos. A busca de variáveis percorre a lista de trás
+para frente. Ao sair de um escopo, suas declarações são removidas.</p>
+<p>Classes são analisadas em escopos isolados. Seus campos e assinaturas são
+registrados antes dos corpos dos métodos. Variáveis locais são analisadas em
+ordem, impedindo o uso de identificadores locais ainda não declarados.</p>
+<h3>Verificações realizadas</h3>
+<ul>
+<li>Existência de variáveis e redeclaração no mesmo escopo.</li>
+<li>Visibilidade em blocos, métodos, laços e classes.</li>
+<li>Tipos de inicializações, atribuições, operações e retornos.</li>
+<li>Condições booleanas e operações lógicas.</li>
+<li>Aridade e tipos de argumentos dos métodos resolvidos no subconjunto.</li>
+<li>Uso de métodos como valores, void indevido e destinos não modificáveis.</li>
+<li>Indexação de vetores, tipo dos índices/tamanhos e uso de length.</li>
+</ul>
+<h3>Promoção numérica e diagnósticos</h3>
+<p>Operações binárias priorizam double, float, long e int, nessa ordem.
+Operadores unários + e - promovem char, byte e short para int. Conversões
+especiais de constantes e atribuições compostas permanecem aproximadas.</p>
+<p>Erros são listados por etapa, com linha, coluna e descrição. O percurso
+distingue uma instrução de uma lista; isso evita verificar novamente os irmãos
+de um nó, como condição e corpo de for.</p>
+<footer>5 / 8</footer>
+</section>
+
+<section class="pagina">
+<h2>6. Compilação, testes e resultados</h2>
+<pre>make
+./compilador testes/Valido.java
+make test
+
+# Windows / MinGW
+mingw32-make
+.\compilador.exe testes\Valido.java
+mingw32-make test PYTHON=py</pre>
+<p>GCC/Clang e make são usados na construção; Python 3 é necessário apenas
+para os scripts de teste. Também é possível compilar diretamente com GCC,
+conforme o README. Retornos: 0 válido; 1 entrada/arquivo; 2 léxico; 3 sintático;
+4 semântico ou construção fora do subconjunto da AST.</p>
+<table>
+<tr><th>Verificação desta revisão</th><th>Resultado observado</th></tr>
+<tr><td>GCC/MinGW C11 com -Wall -Wextra -Wpedantic -Werror,
+-Wshadow e -Wstrict-prototypes</td><td>Compilou sem avisos.</td></tr>
+<tr><td>6 demonstrações + 70 arquivos de revisão</td><td>76/76 retornos e mensagens finais esperados.</td></tr>
+<tr><td>9 casos gerados: aninhamento, AST profunda, UTF-8/BOM/CRLF e comentário aberto</td><td>9/9 resultados esperados, com timeout por caso.</td></tr>
+<tr><td>Regressão da entrega anterior</td><td>52/52 saídas completas e retornos idênticos.</td></tr>
+<tr><td>24 arquivos novos comparados com javac</td><td>24/24 expectativas de aceitação/rejeição confirmadas.</td></tr>
+<tr><td>150 entradas malformadas determinísticas</td><td>Sem travamento, timeout ou retorno inesperado.</td></tr>
+</table>
+<p><strong>Total da suíte atual:</strong> 85 casos. Neste ambiente, Python não
+está instalado: os mesmos arquivos e casos gerados foram executados por um
+verificador PowerShell. Os scripts Python não foram executados nesta revisão.
+O uso de javac foi apenas um oráculo de validação, não uma dependência do projeto.</p>
+<p>Não foram executados novos testes com sanitizadores nem com Clang. Os
+resultados históricos desses recursos não devem ser atribuídos a esta revisão.
+Passar na suíte não comprova conformidade completa com Java.</p>
+<footer>6 / 8</footer>
+</section>
+
+<section class="pagina">
+<h2>7. Dificuldades e limitações</h2>
+<h3>Problemas encontrados e corrigidos</h3>
+<p>A revisão identificou chamadas de erro incompatíveis no parser, funções
+excessivamente compactadas e mistura da construção da AST com a análise
+semântica. A refatoração separou as responsabilidades sem mudar os resultados
+dos casos da entrega anterior.</p>
+<p>Novos testes revelaram tipos de elementos de vetores compartilhando um
+buffer, expressões de tamanho não percorridas, vazamento de símbolos entre
+classes, promoção incorreta de long e aceitação de void em expressões. Foram
+corrigidas também verificações de membros, chamadas da classe e length.</p>
+<h3>Proteção contra entradas muito profundas</h3>
+<p>Há limite de 128 níveis nas regras recursivas do parser e no percurso da
+AST. Não corresponde a 128 pares de parênteses: diferentes regras podem estar
+ativas simultaneamente. Quando excedido, é emitido diagnóstico. A impressão
+é limitada e a liberação da AST não usa recursão, inclusive para árvores
+profundas construídas a partir de longas sequências de operadores.</p>
+<h3>O que permanece fora do escopo</h3>
+<ul>
+<li>Herança, sobrecarga, generics completos, interfaces, exceções, lambdas,
+referências a métodos e resolução de bibliotecas externas.</li>
+<li>Resolução completa de tipos nominais, assinaturas de construtores,
+visibilidade e distinção completa de static/instância.</li>
+<li>Arrays multidimensionais e inicialização por listas { ... } no núcleo
+semântico, ainda que a sintaxe mais ampla reconheça algumas formas.</li>
+<li>Inicialização definitiva de variáveis, análise completa de caminhos de
+retorno e validação de contexto de break/continue.</li>
+<li>Todas as conversões numéricas de Java e suas regras de constantes.</li>
+<li>Validação Unicode completa. O scanner aceita bytes não ASCII em
+identificadores, sem implementar as categorias Unicode da especificação.</li>
+</ul>
+<p>O controle de redeclaração é por nível de escopo. A implementação didática
+permite alguns sombreamentos locais que Java rejeita; isso está preservado em
+um caso de regressão. A gramática e a semântica são deliberadamente parciais.</p>
+<footer>7 / 8</footer>
+</section>
+
+<section class="pagina">
+<h2>8. Ferramentas, referências e entrega</h2>
+<h3>Declaração de apoio de IA</h3>
+<p>A refatoração e a revisão crítica receberam apoio de IA generativa da
+OpenAI, no ambiente OpenCode, com o modelo identificado como GPT-6.1 Sol.
+O apoio foi usado para leitura do enunciado, organização do código, identificação
+e correção de bugs, elaboração de testes e atualização desta documentação.</p>
+<p>A validação desta versão está descrita na página 6. A participação da IA
+não substitui a revisão, o entendimento e a responsabilidade dos integrantes,
+que devem conseguir explicar o código na arguição. Não foram simuladas
+contribuições nem atribuídas autorias individuais fictícias.</p>
+<h3>Referências</h3>
+<ul>
+<li>Enunciado oficial da atividade de Compiladores, Prof.ª Amanda Danielle
+Lima de Oliveira, 2026: documentacao/Enunciado_Oficial.pdf.</li>
+<li>Oracle, The Java Language Specification:
+https://docs.oracle.com/javase/specs/</li>
+<li>Código e casos de teste deste projeto; registros históricos na raiz e
+revisão atual em documentacao/REVISAO_CRITICA.md.</li>
+</ul>
+<h3>Demonstração e participação</h3>
+<p>O arquivo APRESENTACAO.md fornece um roteiro equivalente a slides para
+10 minutos: objetivo, arquitetura, execução válida, erros e limitações.
+Todos os integrantes devem participar. Reservam-se mais 5 minutos para arguição.</p>
+<h3>Pendências que não podem ser substituídas por código</h3>
+<ul>
+<li>Conferir as contribuições individuais reais no repositório existente:
+https://github.com/daviaguiarms/compilador-java-c. Os slides em PowerPoint do
+repositório foram preservados; a cópia local inicial não os continha.</li>
+<li>Confirmar a composição do grupo com a professora: a primeira página do
+enunciado fala em no máximo três alunos, mas a tabela Java lista quatro.</li>
+<li>O grupo deve revisar este relatório, conferir seus dados, ensaiar a
+apresentação e realizar o envio na data exigida.</li>
+</ul>
+<p><strong>Conclusão:</strong> código e materiais técnicos foram revisados
+para o subconjunto declarado. Não é possível afirmar que a entrega acadêmica
+está integralmente concluída antes das ações do grupo acima.</p>
+<footer>8 / 8</footer>
+</section>
+</body>
+</html>
