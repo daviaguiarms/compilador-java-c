@@ -26,6 +26,16 @@ typedef struct {
     int coluna;
 } Token;
 
+typedef struct {
+    Token *itens;
+    int total;
+    int capacidade;
+} VetorTokens;
+
+void vetor_tokens_inicializar(VetorTokens *vetor);
+void vetor_tokens_adicionar(VetorTokens *vetor, Token token);
+void vetor_tokens_liberar(VetorTokens *vetor);
+
 #define TAMANHO_MENSAGEM_ERRO 256
 
 typedef struct {

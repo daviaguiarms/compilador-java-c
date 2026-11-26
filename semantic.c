@@ -1,84 +1,678 @@
 #include "semantic.h"
+
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdarg.h>
-#include <ctype.h>
 
-typedef struct {const VetorTokens*v;int pos,depth;SemanticErrors*errors;} P;
-static const Token*tok(P*p,int offset){int i=p->pos+offset;if(i<0)i=0;if(i>=p->v->total)i=p->v->total-1;return &p->v->itens[i];}
-static const char*lx(P*p,int d){return tok(p,d)->lexema;}
-static int is(P*p,const char*s){return !strcmp(lx(p,0),s);}
-static int end(P*p){return tok(p,0)->tipo==TOK_FIM_ARQUIVO;}
-static void next(P*p){if(!end(p))p->pos++;}
-static int take(P*p,const char*s){if(is(p,s)){next(p);return 1;}return 0;}
-static void err(SemanticErrors*e,int l,int c,const char*fmt,...){if(e->count>=100)return;if(e->count==e->cap){e->cap=e->cap?2*e->cap:16;e->items=realloc(e->items,(size_t)e->cap*sizeof(*e->items));if(!e->items)exit(3);}SemanticError*x=&e->items[e->count++];x->line=l;x->col=c;va_list ap;va_start(ap,fmt);vsnprintf(x->msg,sizeof(x->msg),fmt,ap);va_end(ap);}
-static int need(P*p,const char*s){if(take(p,s))return 1;err(p->errors,tok(p,0)->linha,tok(p,0)->coluna,"Esperado '%s' antes de '%s'",s,lx(p,0));return 0;}
-static int id(P*p){return tok(p,0)->tipo==TOK_IDENTIFICADOR||is(p,"String");}
-static int primitive(const char*s){const char*x[]={"int","long","short","byte","float","double","boolean","char","void", "String"};for(size_t i=0;i<sizeof(x)/sizeof(*x);i++)if(!strcmp(s,x[i]))return 1;return 0;}
-static int modifier(P*p){const char*x[]={"public","private","protected","static","final","abstract","volatile","synchronized"};for(size_t i=0;i<sizeof(x)/sizeof(*x);i++)if(is(p,x[i]))return 1;return 0;}
-static void mods(P*p){while(modifier(p))next(p);}
-static int typestart(P*p){return primitive(lx(p,0))||id(p);}
-static char *cp(const char*s){size_t n=strlen(s)+1;char*v=malloc(n);if(!v)exit(3);memcpy(v,s,n);return v;}
-static char *read_type(P*p){char b[256]="";if(!typestart(p)){err(p->errors,tok(p,0)->linha,tok(p,0)->coluna,"Tipo esperado");return cp("?");}snprintf(b,sizeof(b),"%s",lx(p,0));next(p);while(is(p,"[")&&!strcmp(lx(p,1),"]")){next(p);next(p);if(strlen(b)+2<sizeof(b))strcat(b,"[]");}return cp(b);}
-static AST*node(P*p,NodeKind k,const char*s,const char*t){const Token*x=tok(p,0);return ast_new(k,s,t,x->linha,x->coluna);}
-static AST*expression(P*p,int min);
-static int prec(const char*s){if(!strcmp(s,"=")||!strcmp(s,"+=")||!strcmp(s,"-=")||!strcmp(s,"*=")||!strcmp(s,"/="))return 1;if(!strcmp(s,"||"))return 2;if(!strcmp(s,"&&"))return 3;if(!strcmp(s,"==")||!strcmp(s,"!="))return 4;if(!strcmp(s,"<")||!strcmp(s,">")||!strcmp(s,"<=")||!strcmp(s,">="))return 5;if(!strcmp(s,"+")||!strcmp(s,"-"))return 6;if(!strcmp(s,"*")||!strcmp(s,"/")||!strcmp(s,"%"))return 7;return 0;}
-static AST*primary(P*p){if(++p->depth>128){err(p->errors,tok(p,0)->linha,tok(p,0)->coluna,"Expressao muito aninhada");p->depth--;return node(p,N_EMPTY,"erro",NULL);}AST*n=NULL;const Token*t=tok(p,0);
-if(is(p,"!")||is(p,"-")||is(p,"+")||is(p,"++")||is(p,"--")){n=node(p,N_UNARY,lx(p,0),NULL);next(p);ast_add(n,primary(p));}
-else if(take(p,"(")){n=expression(p,1);need(p,")");}
-else if(take(p,"new")){n=ast_new(N_NEW,"new",NULL,t->linha,t->coluna);char*type=read_type(p);free(n->type);n->type=type;if(take(p,"(")){if(!is(p,")")){ast_add(n,expression(p,1));while(take(p,","))ast_add(n,expression(p,1));}need(p,")");}else if(take(p,"[")){if(!is(p,"]"))ast_add(n,expression(p,1));need(p,"]");size_t k=strlen(n->type);char *array=realloc(n->type,k+3);if(!array)exit(3);n->type=array;strcat(n->type,"[]");}}
-else if(t->tipo==TOK_LITERAL_INTEIRO||t->tipo==TOK_LITERAL_DECIMAL||t->tipo==TOK_LITERAL_TEXTO||t->tipo==TOK_LITERAL_CARACTERE||t->tipo==TOK_LITERAL_BOOLEANO||t->tipo==TOK_LITERAL_NULO){size_t tl=strlen(t->lexema);char last=tl?(char)tolower((unsigned char)t->lexema[tl-1]):0;const char*ty=t->tipo==TOK_LITERAL_INTEIRO?(last=='l'?"long":"int"):t->tipo==TOK_LITERAL_DECIMAL?(last=='f'?"float":"double"):t->tipo==TOK_LITERAL_TEXTO?"String":t->tipo==TOK_LITERAL_CARACTERE?"char":t->tipo==TOK_LITERAL_BOOLEANO?"boolean":"null";n=node(p,N_LITERAL,t->lexema,ty);next(p);}
-else if(id(p)||is(p,"this")){n=node(p,N_IDENT,lx(p,0),NULL);next(p);}
-else{err(p->errors,t->linha,t->coluna,"Expressao invalida em '%s'",t->lexema);n=node(p,N_EMPTY,"erro",NULL);next(p);}
-while(!end(p)){if(take(p,".")){AST*m=node(p,N_MEMBER,lx(p,0),NULL);if(!id(p)){err(p->errors,tok(p,0)->linha,tok(p,0)->coluna,"Membro esperado");break;}next(p);ast_add(m,n);n=m;}
-else if(take(p,"(")){AST*c=node(p,N_CALL,"chamada",NULL);ast_add(c,n);if(!is(p,")")){ast_add(c,expression(p,1));while(take(p,","))ast_add(c,expression(p,1));}need(p,")");n=c;}
-else if(take(p,"[")){AST*a=node(p,N_INDEX,"[]",NULL);ast_add(a,n);ast_add(a,expression(p,1));need(p,"]");n=a;}
-else if(is(p,"++")||is(p,"--")){AST*u=node(p,N_UNARY,lx(p,0),NULL);next(p);ast_add(u,n);n=u;}else break;}
-p->depth--;return n;}
-static AST*expression(P*p,int min){AST*left=primary(p);while(!end(p)){int level=prec(lx(p,0));if(level<min)break;const Token*t=tok(p,0);AST*n=ast_new(level==1?N_ASSIGN:N_BINARY,t->lexema,NULL,t->linha,t->coluna);next(p);ast_add(n,left);ast_add(n,expression(p,level+(level==1?0:1)));left=n;}return left;}
-static AST*statement(P*p);
-static AST*block(P*p){AST*n=node(p,N_BLOCK,"{}",NULL);need(p,"{");int guard=0;while(!end(p)&&!is(p,"}")&&guard++<10000){int before=p->pos;ast_add(n,statement(p));if(p->pos==before)next(p);}need(p,"}");return n;}
-static AST*variable(P*p,int semi){const Token*t=tok(p,0);char*type=read_type(p);AST*n=ast_new(N_VAR,NULL,type,t->linha,t->coluna);free(type);if(!id(p)){err(p->errors,tok(p,0)->linha,tok(p,0)->coluna,"Nome de variavel esperado");return n;}n->text=cp(lx(p,0));next(p);if(take(p,"="))ast_add(n,expression(p,1));if(semi)need(p,";");return n;}
-static AST*statement(P*p){if(is(p,"{"))return block(p);if(take(p,";"))return node(p,N_EMPTY,";",NULL);
-if(is(p,"if")){AST*n=node(p,N_IF,"if",NULL);next(p);need(p,"(");ast_add(n,expression(p,1));need(p,")");ast_add(n,statement(p));if(take(p,"else"))ast_add(n,statement(p));return n;}
-if(is(p,"while")){AST*n=node(p,N_WHILE,"while",NULL);next(p);need(p,"(");ast_add(n,expression(p,1));need(p,")");ast_add(n,statement(p));return n;}
-if(is(p,"for")){AST*n=node(p,N_FOR,"for",NULL);next(p);need(p,"(");if(!is(p,";")){if(primitive(lx(p,0)))ast_add(n,variable(p,0));else ast_add(n,expression(p,1));}else ast_add(n,node(p,N_EMPTY,"init",NULL));need(p,";");if(!is(p,";"))ast_add(n,expression(p,1));else ast_add(n,node(p,N_EMPTY,"cond",NULL));need(p,";");if(!is(p,")"))ast_add(n,expression(p,1));else ast_add(n,node(p,N_EMPTY,"passo",NULL));need(p,")");ast_add(n,statement(p));return n;}
-if(is(p,"return")){AST*n=node(p,N_RETURN,"return",NULL);next(p);if(!is(p,";"))ast_add(n,expression(p,1));need(p,";");return n;}
-if(is(p,"break")||is(p,"continue")){AST*n=node(p,N_EMPTY,lx(p,0),NULL);next(p);need(p,";");return n;}
+typedef enum { SIMBOLO_VARIAVEL, SIMBOLO_METODO } CategoriaSimbolo;
 
-if(primitive(lx(p,0))){int save=p->pos;next(p);while(take(p,"["))need(p,"]");int var=id(p);p->pos=save;if(var){AST*n=variable(p,0);AST*tail=n;while(take(p,",")){AST*v=node(p,N_VAR,lx(p,0),n->type);next(p);if(take(p,"="))ast_add(v,expression(p,1));tail->next=v;tail=v;}need(p,";");return n;}}
-AST*n=node(p,N_EXPR_STMT,"expressao",NULL);ast_add(n,expression(p,1));need(p,";");return n;}
-static AST*method(P*p,const char*type,const char*name,int line,int col){AST*n=ast_new(N_METHOD,name,type,line,col);need(p,"(");if(!is(p,")")){do{const Token*t=tok(p,0);char*ty=read_type(p);AST*a=ast_new(N_PARAM,id(p)?lx(p,0):"?",ty,t->linha,t->coluna);free(ty);if(id(p))next(p);else err(p->errors,tok(p,0)->linha,tok(p,0)->coluna,"Parametro sem nome");ast_add(n,a);}while(take(p,","));}need(p,")");if(is(p,"{"))ast_add(n,block(p));else need(p,";");return n;}
-AST*build_ast(const VetorTokens*tokens,SemanticErrors*errors){P p={tokens,0,0,errors};AST*root=node(&p,N_PROGRAM,"Java",NULL);while(!end(&p)){if(take(&p,"package")||take(&p,"import")){while(!end(&p)&&!take(&p,";"))next(&p);continue;}mods(&p);if(!take(&p,"class")){err(errors,tok(&p,0)->linha,tok(&p,0)->coluna,"Classe esperada");next(&p);continue;}AST*cl=node(&p,N_CLASS,lx(&p,0),NULL);next(&p);ast_add(root,cl);if(!need(&p,"{"))break;int guard=0;while(!end(&p)&&!is(&p,"}")&&guard++<10000){mods(&p);if(take(&p,";"))continue;if(is(&p,"}"))break;if(!typestart(&p)){err(errors,tok(&p,0)->linha,tok(&p,0)->coluna,"Membro de classe invalido");next(&p);continue;}const Token*t=tok(&p,0);char*ty=read_type(&p);if(!id(&p)){err(errors,tok(&p,0)->linha,tok(&p,0)->coluna,"Nome de membro esperado");free(ty);next(&p);continue;}char*name=cp(lx(&p,0));next(&p);if(is(&p,"(")){AST*m=method(&p,ty,name,t->linha,t->coluna);ast_add(cl,m);}else{AST*v=ast_new(N_VAR,name,ty,t->linha,t->coluna);if(take(&p,"="))ast_add(v,expression(&p,1));ast_add(cl,v);while(take(&p,",")){AST*w=node(&p,N_VAR,lx(&p,0),ty);next(&p);if(take(&p,"="))ast_add(w,expression(&p,1));ast_add(cl,w);}need(&p,";");}free(name);free(ty);}need(&p,"}");}return root;}
+typedef struct {
+    char *nome;
+    char *tipo;
+    int escopo;
+    CategoriaSimbolo categoria;
+    int total_parametros;
+    char **parametros;
+} SimboloSemantico;
 
-typedef struct {char*name,*type;int depth,kind,arity;char **params;int line;} Symbol;
-typedef struct {Symbol*items;int n,cap,depth;SemanticErrors*errors;const AST*method;char*return_type;} Env;
-static Symbol*lookup(Env*e,const char*name){for(int i=e->n-1;i>=0;i--)if(!strcmp(e->items[i].name,name))return &e->items[i];return NULL;}
-static Symbol*add_sym(Env*e,const char*name,const char*type,int kind,int line,int col){for(int i=e->n-1;i>=0;i--){if(e->items[i].depth<e->depth)break;if(!strcmp(e->items[i].name,name)){err(e->errors,line,col,"Redeclaracao de '%s' no mesmo escopo",name);return NULL;}}
-if(e->n==e->cap){e->cap=e->cap?e->cap*2:32;e->items=realloc(e->items,(size_t)e->cap*sizeof(Symbol));if(!e->items)exit(3);}Symbol*s=&e->items[e->n++];memset(s,0,sizeof(*s));s->name=cp(name);s->type=cp(type?type:"?");s->kind=kind;s->depth=e->depth;s->line=line;return s;}
-static void pop(Env*e){while(e->n>0&&e->items[e->n-1].depth==e->depth){Symbol*s=&e->items[--e->n];for(int j=0;j<s->arity;j++)free(s->params[j]);free(s->params);free(s->name);free(s->type);}e->depth--;}
-static int numeric(const char*t){return !strcmp(t,"int")||!strcmp(t,"double")||!strcmp(t,"float")||!strcmp(t,"long")||!strcmp(t,"short")||!strcmp(t,"byte")||!strcmp(t,"char");}
-static int compatible(const char*to,const char*from){if(!to||!from||!strcmp(to,"?")||!strcmp(from,"?"))return 1;if(!strcmp(to,from))return 1;if(!strcmp(from,"null"))return !numeric(to)&&strcmp(to,"boolean");if(numeric(to)&&numeric(from)){if(!strcmp(to,"double"))return 1;if(!strcmp(to,"float"))return strcmp(from,"double")!=0;if(!strcmp(to,"long"))return !strcmp(from,"int")||!strcmp(from,"short")||!strcmp(from,"byte")||!strcmp(from,"char");if(!strcmp(to,"int"))return !strcmp(from,"short")||!strcmp(from,"byte")||!strcmp(from,"char");}return 0;}
-static const char*etype(Env*e,const AST*n);
-static const char*etype(Env*e,const AST*n){if(!n)return "void";const AST*a=n->child,*b=a?a->next:NULL;switch(n->kind){case N_LITERAL:return n->type?n->type:"?";
-case N_IDENT:{if(!strcmp(n->text,"this"))return "?";Symbol*s=lookup(e,n->text);if(!s){err(e->errors,n->line,n->col,"Identificador '%s' usado antes da declaracao",n->text);return "?";}if(s->kind==1){err(e->errors,n->line,n->col,"Metodo '%s' usado como valor sem chamada",n->text);return "?";}return s->type;}
-case N_MEMBER:{if(a&&a->kind==N_IDENT&&!strcmp(a->text,"System"))return "builtin";const char*ty=etype(e,a);if(!strcmp(n->text,"length"))return "int";return !strcmp(ty,"builtin")?"builtin":"?";}
-case N_INDEX:{const char*t=etype(e,a);const char*index=etype(e,b);static char out[128];size_t len=strlen(t);if(strcmp(index,"?")&&strcmp(index,"int")&&strcmp(index,"short")&&strcmp(index,"byte")&&strcmp(index,"char"))err(e->errors,n->line,n->col,"Indice de vetor deve ser inteiro, recebido %s",index);if(len>2&&t[len-2]=='['&&t[len-1]==']'){snprintf(out,sizeof(out),"%.*s",(int)(len-2),t);return out;}if(strcmp(t,"?"))err(e->errors,n->line,n->col,"Indexacao exige vetor, recebido %s",t);return "?";}
-case N_NEW:return n->type?n->type:"?";
-case N_CALL:{const AST*arg=a?a->next:NULL;const char*name=a?a->text:"?";Symbol*s=NULL;if(a&&a->kind==N_IDENT)s=lookup(e,name);else if(a&&a->kind==N_MEMBER){if(a->child&&a->child->kind==N_MEMBER&&a->child->child&&a->child->child->kind==N_IDENT&&!strcmp(a->child->child->text,"System")&&!strcmp(a->child->text,"out")){int count=0;for(const AST*x=arg;x;x=x->next){etype(e,x);count++;}if(strcmp(a->text,"print")&&strcmp(a->text,"println"))err(e->errors,n->line,n->col,"Metodo System.out.%s nao suportado",a->text);else if(count>1||(!strcmp(a->text,"print")&&count!=1))err(e->errors,n->line,n->col,"System.out.%s recebeu %d argumento(s)",a->text,count);return "void";}etype(e,a->child);}int count=0;for(const AST*x=arg;x;x=x->next)count++;if(!s){if(a&&a->kind==N_IDENT)err(e->errors,n->line,n->col,"Funcao '%s' nao declarada",name);for(;arg;arg=arg->next)etype(e,arg);return "?";}if(s->kind!=1){err(e->errors,n->line,n->col,"'%s' nao e uma funcao",name);return "?";}if(count!=s->arity)err(e->errors,n->line,n->col,"Funcao '%s' espera %d argumento(s), recebeu %d",name,s->arity,count);int j=0;for(;arg;arg=arg->next,j++){const char*t=etype(e,arg);if(j<s->arity&&!compatible(s->params[j],t))err(e->errors,arg->line,arg->col,"Argumento %d de '%s': esperado %s, recebido %s",j+1,name,s->params[j],t);}return s->type;}
-case N_UNARY:{const char*t=etype(e,a);if(!strcmp(n->text,"!")){if(strcmp(t,"boolean")&&strcmp(t,"?"))err(e->errors,n->line,n->col,"Operador ! exige boolean");return "boolean";}if(!strcmp(n->text,"++")||!strcmp(n->text,"--")){if(a&&a->kind!=N_IDENT&&a->kind!=N_MEMBER&&a->kind!=N_INDEX)err(e->errors,n->line,n->col,"Incremento/decremento exige variavel modificavel");if(!numeric(t)&&strcmp(t,"?"))err(e->errors,n->line,n->col,"Incremento/decremento exige tipo numerico, recebido %s",t);return t;}if(!strcmp(n->text,"+")||!strcmp(n->text,"-")){if(!numeric(t)&&strcmp(t,"?"))err(e->errors,n->line,n->col,"Operador unario aritmetico exige numero, recebido %s",t);}return t;}
-case N_ASSIGN:{const char*to=etype(e,a),*from=etype(e,b);if(a&&a->kind!=N_IDENT&&a->kind!=N_INDEX&&a->kind!=N_MEMBER)err(e->errors,n->line,n->col,"Atribuicao exige destino modificavel");if(strcmp(n->text,"=")&&((!numeric(to)&&strcmp(to,"?"))||(!numeric(from)&&strcmp(from,"?"))))err(e->errors,n->line,n->col,"Atribuicao composta %s exige numeros",n->text);if(!compatible(to,from))err(e->errors,n->line,n->col,"Atribuicao incompativel: %s recebe %s",to,from);return to;}
-case N_BINARY:{const char*left=etype(e,a),*right=etype(e,b);const char*op=n->text;if(!strcmp(op,"==")||!strcmp(op,"!=")){if(!compatible(left,right)&&!compatible(right,left))err(e->errors,n->line,n->col,"Comparacao incompativel entre %s e %s",left,right);return "boolean";}if(!strcmp(op,"<")||!strcmp(op,">")||!strcmp(op,"<=")||!strcmp(op,">=")){if((!numeric(left)&&strcmp(left,"?"))||(!numeric(right)&&strcmp(right,"?")))err(e->errors,n->line,n->col,"Comparacao relacional exige numeros");return "boolean";}if(!strcmp(op,"&&")||!strcmp(op,"||")){if((strcmp(left,"boolean")&&strcmp(left,"?"))||(strcmp(right,"boolean")&&strcmp(right,"?")))err(e->errors,n->line,n->col,"Operador logico exige boolean");return "boolean";}if(!strcmp(op,"+")&&(!strcmp(left,"String")||!strcmp(right,"String")))return "String";if((!numeric(left)&&strcmp(left,"?"))||(!numeric(right)&&strcmp(right,"?")))err(e->errors,n->line,n->col,"Operador aritmetico exige numeros");return !strcmp(left,"double")||!strcmp(right,"double")?"double":!strcmp(left,"float")||!strcmp(right,"float")?"float": "int";}
-default:return "?";}}
-static void visit(Env*e,const AST*n){for(;n;n=n->next){switch(n->kind){case N_BLOCK:e->depth++;visit(e,n->child);pop(e);break;
-case N_VAR:{if(n->type&&!strcmp(n->type,"void"))err(e->errors,n->line,n->col,"Variavel '%s' nao pode ter tipo void",n->text?n->text:"?");const char*got=n->child?etype(e,n->child):NULL;add_sym(e,n->text?n->text:"?",n->type,0,n->line,n->col);if(got&&!compatible(n->type,got))err(e->errors,n->line,n->col,"Inicializacao de '%s': %s nao aceita %s",n->text,n->type,got);break;}
-case N_IF:{const AST*cond=n->child;const char*t=etype(e,cond);if(strcmp(t,"boolean")&&strcmp(t,"?"))err(e->errors,n->line,n->col,"Condicao de if deve ser boolean, recebeu %s",t);if(cond&&cond->next){const AST*thenb=cond->next;const AST*elseb=thenb->next;AST temp=*thenb;temp.next=NULL;e->depth++;visit(e,&temp);pop(e);if(elseb){AST tmp=*elseb;tmp.next=NULL;e->depth++;visit(e,&tmp);pop(e);}}break;}
-case N_WHILE:{const AST*cond=n->child;const char*t=etype(e,cond);if(strcmp(t,"boolean")&&strcmp(t,"?"))err(e->errors,n->line,n->col,"Condicao de while deve ser boolean");if(cond&&cond->next){AST tmp=*cond->next;tmp.next=NULL;e->depth++;visit(e,&tmp);pop(e);}break;}
-case N_FOR:{e->depth++;const AST*i=n->child;const AST*c=i?i->next:NULL;const AST*step=c?c->next:NULL;const AST*body=step?step->next:NULL;if(i){if(i->kind==N_VAR)visit(e,i);else if(i->kind!=N_EMPTY)etype(e,i);}if(c&&c->kind!=N_EMPTY){const char*t=etype(e,c);if(strcmp(t,"boolean")&&strcmp(t,"?"))err(e->errors,c->line,c->col,"Condicao de for deve ser boolean");}if(step&&step->kind!=N_EMPTY)etype(e,step);if(body){AST tmp=*body;tmp.next=NULL;visit(e,&tmp);}pop(e);break;}
-case N_RETURN:{const char*t=n->child?etype(e,n->child):"void";if(!compatible(e->return_type?e->return_type:"void",t))err(e->errors,n->line,n->col,"Retorno incompativel: metodo retorna %s, expressao %s",e->return_type?e->return_type:"void",t);break;}
-case N_EXPR_STMT:etype(e,n->child);break;default:break;}}}
-void semantic_check(const AST*root,SemanticErrors*errors){Env e={0};e.errors=errors;e.depth=0;for(const AST*cl=root?root->child:NULL;cl;cl=cl->next){for(const AST*n=cl->child;n;n=n->next){if(n->kind==N_METHOD){Symbol*s=add_sym(&e,n->text,n->type,1,n->line,n->col);if(s){for(const AST*a=n->child;a&&a->kind==N_PARAM;a=a->next){s->params=realloc(s->params,(size_t)(s->arity+1)*sizeof(char*));if(!s->params)exit(3);s->params[s->arity++]=cp(a->type);}}}else if(n->kind==N_VAR){if(n->type&&!strcmp(n->type,"void"))err(errors,n->line,n->col,"Campo '%s' nao pode ter tipo void",n->text);add_sym(&e,n->text,n->type,0,n->line,n->col);}}
-for(const AST*n=cl->child;n;n=n->next){if(n->kind==N_METHOD){e.depth++;e.return_type=n->type;const AST*a=n->child;while(a&&a->kind==N_PARAM){if(a->type&&!strcmp(a->type,"void"))err(errors,a->line,a->col,"Parametro '%s' nao pode ter tipo void",a->text);add_sym(&e,a->text,a->type,0,a->line,a->col);a=a->next;}if(a)visit(&e,a);pop(&e);}else if(n->kind==N_VAR&&n->child){const char*t=etype(&e,n->child);if(!compatible(n->type,t))err(errors,n->line,n->col,"Campo '%s' incompativel",n->text);}}}
-while(e.depth>=0){pop(&e);if(e.depth<0)break;}free(e.items);}
-void semantic_errors_free(SemanticErrors*e){free(e->items);memset(e,0,sizeof(*e));}
+typedef struct {
+    SimboloSemantico *simbolos;
+    int total;
+    int capacidade;
+    int escopo;
+    SemanticErrors *erros;
+    const char *tipo_retorno;
+    const char *nome_classe;
+} ContextoSemantico;
+
+static char *copiar_texto(const char *texto) {
+    size_t tamanho = strlen(texto) + 1;
+    char *copia = malloc(tamanho);
+    if (copia == NULL) {
+        exit(EXIT_FAILURE);
+    }
+    memcpy(copia, texto, tamanho);
+    return copia;
+}
+
+static void erro_semantico(SemanticErrors *erros, int linha, int coluna,
+                           const char *formato, ...) {
+    if (erros->count >= 100) {
+        return;
+    }
+    if (erros->count == erros->cap) {
+        erros->cap = erros->cap ? erros->cap * 2 : 16;
+        SemanticError *itens = realloc(erros->items, (size_t)erros->cap * sizeof(*itens));
+        if (itens == NULL) {
+            exit(EXIT_FAILURE);
+        }
+        erros->items = itens;
+    }
+
+    SemanticError *erro = &erros->items[erros->count++];
+    erro->line = linha;
+    erro->col = coluna;
+    va_list argumentos;
+    va_start(argumentos, formato);
+    vsnprintf(erro->msg, sizeof(erro->msg), formato, argumentos);
+    va_end(argumentos);
+}
+
+static SimboloSemantico *buscar_simbolo(ContextoSemantico *contexto, const char *nome) {
+    for (int i = contexto->total - 1; i >= 0; i--) {
+        if (strcmp(contexto->simbolos[i].nome, nome) == 0) {
+            return &contexto->simbolos[i];
+        }
+    }
+    return NULL;
+}
+
+static SimboloSemantico *buscar_membro(ContextoSemantico *contexto, const char *nome) {
+    for (int i = contexto->total - 1; i >= 0; i--) {
+        SimboloSemantico *simbolo = &contexto->simbolos[i];
+        if (simbolo->escopo == 1 && strcmp(simbolo->nome, nome) == 0) {
+            return simbolo;
+        }
+    }
+    return NULL;
+}
+
+static int membro_da_classe(ContextoSemantico *contexto, const AST *no) {
+    const AST *objeto = no ? no->child : NULL;
+    return objeto && objeto->kind == N_IDENT &&
+           (strcmp(objeto->text, "this") == 0 ||
+            (contexto->nome_classe && strcmp(objeto->text, contexto->nome_classe) == 0));
+}
+
+static SimboloSemantico *declarar_simbolo(ContextoSemantico *contexto, const AST *no,
+                                         CategoriaSimbolo categoria) {
+    const char *nome = no->text ? no->text : "?";
+    for (int i = contexto->total - 1; i >= 0; i--) {
+        SimboloSemantico *simbolo = &contexto->simbolos[i];
+        if (simbolo->escopo < contexto->escopo) {
+            break;
+        }
+        if (strcmp(simbolo->nome, nome) == 0) {
+            erro_semantico(contexto->erros, no->line, no->col,
+                           "Redeclaracao de '%s' no mesmo escopo", nome);
+            return NULL;
+        }
+    }
+
+    if (contexto->total == contexto->capacidade) {
+        contexto->capacidade = contexto->capacidade ? contexto->capacidade * 2 : 32;
+        SimboloSemantico *simbolos = realloc(contexto->simbolos,
+            (size_t)contexto->capacidade * sizeof(*simbolos));
+        if (simbolos == NULL) {
+            exit(EXIT_FAILURE);
+        }
+        contexto->simbolos = simbolos;
+    }
+
+    SimboloSemantico *simbolo = &contexto->simbolos[contexto->total++];
+    memset(simbolo, 0, sizeof(*simbolo));
+    simbolo->nome = copiar_texto(nome);
+    simbolo->tipo = copiar_texto(no->type ? no->type : "?");
+    simbolo->categoria = categoria;
+    simbolo->escopo = contexto->escopo;
+    return simbolo;
+}
+
+static void sair_escopo(ContextoSemantico *contexto) {
+    while (contexto->total > 0 &&
+           contexto->simbolos[contexto->total - 1].escopo == contexto->escopo) {
+        SimboloSemantico *simbolo = &contexto->simbolos[--contexto->total];
+        for (int i = 0; i < simbolo->total_parametros; i++) {
+            free(simbolo->parametros[i]);
+        }
+        free(simbolo->parametros);
+        free(simbolo->nome);
+        free(simbolo->tipo);
+    }
+    contexto->escopo--;
+}
+
+static int tipo_numerico(const char *tipo) {
+    const char *tipos[] = {"int", "double", "float", "long", "short", "byte", "char"};
+    for (size_t i = 0; i < sizeof(tipos) / sizeof(tipos[0]); i++) {
+        if (strcmp(tipo, tipos[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int tipo_void(const char *tipo) {
+    return tipo && strncmp(tipo, "void", 4) == 0 &&
+           (tipo[4] == '\0' || tipo[4] == '[');
+}
+
+static int tipos_compativeis(const char *destino, const char *origem) {
+    if (destino == NULL || origem == NULL ||
+        strcmp(destino, "?") == 0 || strcmp(origem, "?") == 0) {
+        return 1;
+    }
+    if (strcmp(destino, origem) == 0) {
+        return 1;
+    }
+    if (strcmp(origem, "null") == 0) {
+        return !tipo_numerico(destino) && strcmp(destino, "boolean") != 0 &&
+               strcmp(destino, "void") != 0;
+    }
+    if (!tipo_numerico(destino) || !tipo_numerico(origem)) {
+        return 0;
+    }
+    if (strcmp(destino, "double") == 0) {
+        return 1;
+    }
+    if (strcmp(destino, "float") == 0) {
+        return strcmp(origem, "double") != 0;
+    }
+    if (strcmp(destino, "long") == 0 && strcmp(origem, "int") == 0) {
+        return 1;
+    }
+    if (strcmp(destino, "long") == 0 || strcmp(destino, "int") == 0) {
+        return strcmp(origem, "short") == 0 || strcmp(origem, "byte") == 0 ||
+               strcmp(origem, "char") == 0;
+    }
+    return 0;
+}
+
+static int numero_ou_desconhecido(const char *tipo) {
+    return tipo_numerico(tipo) || strcmp(tipo, "?") == 0;
+}
+
+static int booleano_ou_desconhecido(const char *tipo) {
+    return strcmp(tipo, "boolean") == 0 || strcmp(tipo, "?") == 0;
+}
+
+static int destino_modificavel(ContextoSemantico *contexto, const AST *no) {
+    if (no && no->kind == N_MEMBER && strcmp(no->text, "length") == 0 &&
+        !membro_da_classe(contexto, no)) {
+        return 0;
+    }
+    return no && (no->kind == N_IDENT || no->kind == N_MEMBER || no->kind == N_INDEX);
+}
+
+static const char *tipo_expressao(ContextoSemantico *contexto, AST *no);
+
+static int tipo_indice(const char *tipo) {
+    return strcmp(tipo, "?") == 0 || strcmp(tipo, "int") == 0 ||
+           strcmp(tipo, "short") == 0 || strcmp(tipo, "byte") == 0 ||
+           strcmp(tipo, "char") == 0;
+}
+
+static int chamada_de_saida(const AST *destino) {
+    if (destino == NULL || destino->kind != N_MEMBER) {
+        return 0;
+    }
+    const AST *objeto = destino->child;
+    return objeto && objeto->kind == N_MEMBER && strcmp(objeto->text, "out") == 0 &&
+           objeto->child && objeto->child->kind == N_IDENT &&
+           strcmp(objeto->child->text, "System") == 0;
+}
+
+static const char *verificar_chamada(ContextoSemantico *contexto, AST *no) {
+    AST *destino = no->child;
+    AST *argumentos = destino ? destino->next : NULL;
+    const char *nome = destino ? destino->text : "?";
+    int quantidade = 0;
+    for (AST *argumento = argumentos; argumento; argumento = argumento->next) {
+        quantidade++;
+    }
+
+    if (chamada_de_saida(destino)) {
+        for (AST *argumento = argumentos; argumento; argumento = argumento->next) {
+            if (strcmp(tipo_expressao(contexto, argumento), "void") == 0) {
+                erro_semantico(contexto->erros, argumento->line, argumento->col,
+                               "Argumento de System.out.%s nao pode ser void", nome);
+            }
+        }
+        if (strcmp(nome, "print") != 0 && strcmp(nome, "println") != 0) {
+            erro_semantico(contexto->erros, no->line, no->col,
+                           "Metodo System.out.%s nao suportado", nome);
+        } else if (quantidade > 1 || (strcmp(nome, "print") == 0 && quantidade != 1)) {
+            erro_semantico(contexto->erros, no->line, no->col,
+                           "System.out.%s recebeu %d argumento(s)", nome, quantidade);
+        }
+        return "void";
+    }
+
+    SimboloSemantico *metodo = NULL;
+    int chamada_local = destino && destino->kind == N_IDENT;
+    if (destino && destino->kind == N_IDENT) {
+        metodo = buscar_simbolo(contexto, nome);
+    } else if (destino && destino->kind == N_MEMBER) {
+        if (membro_da_classe(contexto, destino)) {
+            metodo = buscar_membro(contexto, nome);
+            chamada_local = 1;
+        } else {
+            tipo_expressao(contexto, destino->child);
+            erro_semantico(contexto->erros, no->line, no->col,
+                           "Chamada de membro '%s' fora do subconjunto", nome);
+        }
+    } else {
+        tipo_expressao(contexto, destino);
+        erro_semantico(contexto->erros, no->line, no->col,
+                       "Destino de chamada nao e uma funcao");
+    }
+
+    if (metodo == NULL) {
+        if (chamada_local) {
+            erro_semantico(contexto->erros, no->line, no->col,
+                           "Funcao '%s' nao declarada", nome);
+        }
+        for (AST *argumento = argumentos; argumento; argumento = argumento->next) {
+            tipo_expressao(contexto, argumento);
+        }
+        return "?";
+    }
+    if (metodo->categoria != SIMBOLO_METODO) {
+        erro_semantico(contexto->erros, no->line, no->col, "'%s' nao e uma funcao", nome);
+        for (AST *argumento = argumentos; argumento; argumento = argumento->next) {
+            tipo_expressao(contexto, argumento);
+        }
+        return "?";
+    }
+    if (quantidade != metodo->total_parametros) {
+        erro_semantico(contexto->erros, no->line, no->col,
+                       "Funcao '%s' espera %d argumento(s), recebeu %d",
+                       nome, metodo->total_parametros, quantidade);
+    }
+
+    int indice = 0;
+    for (AST *argumento = argumentos; argumento; argumento = argumento->next, indice++) {
+        const char *tipo = tipo_expressao(contexto, argumento);
+        if (indice < metodo->total_parametros &&
+            !tipos_compativeis(metodo->parametros[indice], tipo)) {
+            erro_semantico(contexto->erros, argumento->line, argumento->col,
+                           "Argumento %d de '%s': esperado %s, recebido %s",
+                           indice + 1, nome, metodo->parametros[indice], tipo);
+        }
+    }
+    return metodo->tipo;
+}
+
+static const char *verificar_binaria(ContextoSemantico *contexto, AST *no) {
+    const char *esquerda = tipo_expressao(contexto, no->child);
+    const char *direita = tipo_expressao(contexto, no->child->next);
+    const char *operador = no->text;
+
+    if (strcmp(esquerda, "void") == 0 || strcmp(direita, "void") == 0) {
+        erro_semantico(contexto->erros, no->line, no->col,
+                       "Operador %s nao aceita expressao void", operador);
+        return "?";
+    }
+
+    if (strcmp(operador, "==") == 0 || strcmp(operador, "!=") == 0) {
+        if (!tipos_compativeis(esquerda, direita) && !tipos_compativeis(direita, esquerda)) {
+            erro_semantico(contexto->erros, no->line, no->col,
+                           "Comparacao incompativel entre %s e %s", esquerda, direita);
+        }
+        return "boolean";
+    }
+    if (strcmp(operador, "<") == 0 || strcmp(operador, ">") == 0 ||
+        strcmp(operador, "<=") == 0 || strcmp(operador, ">=") == 0) {
+        if (!numero_ou_desconhecido(esquerda) || !numero_ou_desconhecido(direita)) {
+            erro_semantico(contexto->erros, no->line, no->col,
+                           "Comparacao relacional exige numeros");
+        }
+        return "boolean";
+    }
+    if (strcmp(operador, "&&") == 0 || strcmp(operador, "||") == 0) {
+        if (!booleano_ou_desconhecido(esquerda) || !booleano_ou_desconhecido(direita)) {
+            erro_semantico(contexto->erros, no->line, no->col, "Operador logico exige boolean");
+        }
+        return "boolean";
+    }
+    if (strcmp(operador, "+") == 0 &&
+        (strcmp(esquerda, "String") == 0 || strcmp(direita, "String") == 0)) {
+        return "String";
+    }
+    if (!numero_ou_desconhecido(esquerda) || !numero_ou_desconhecido(direita)) {
+        erro_semantico(contexto->erros, no->line, no->col, "Operador aritmetico exige numeros");
+    }
+    if (strcmp(esquerda, "double") == 0 || strcmp(direita, "double") == 0) {
+        return "double";
+    }
+    if (strcmp(esquerda, "float") == 0 || strcmp(direita, "float") == 0) {
+        return "float";
+    }
+    if (strcmp(esquerda, "long") == 0 || strcmp(direita, "long") == 0) {
+        return "long";
+    }
+    return "int";
+}
+
+static const char *tipo_expressao(ContextoSemantico *contexto, AST *no) {
+    if (no == NULL) {
+        return "void";
+    }
+    AST *primeiro = no->child;
+    AST *segundo = primeiro ? primeiro->next : NULL;
+
+    switch (no->kind) {
+        case N_LITERAL:
+            return no->type ? no->type : "?";
+        case N_NEW: {
+            const char *tipo = no->type ? no->type : "?";
+            size_t tamanho = strlen(tipo);
+            int vetor = tamanho > 2 && strcmp(tipo + tamanho - 2, "[]") == 0;
+            if (tipo_void(tipo) || (!vetor && (tipo_numerico(tipo) || strcmp(tipo, "boolean") == 0))) {
+                erro_semantico(contexto->erros, no->line, no->col,
+                               "Tipo %s invalido na criacao com new", tipo);
+            }
+            if (vetor && primeiro == NULL) {
+                erro_semantico(contexto->erros, no->line, no->col,
+                               "Criacao de vetor exige tamanho");
+            }
+            for (AST *argumento = primeiro; argumento; argumento = argumento->next) {
+                const char *recebido = tipo_expressao(contexto, argumento);
+                if (vetor && !tipo_indice(recebido)) {
+                    erro_semantico(contexto->erros, argumento->line, argumento->col,
+                                   "Tamanho de vetor deve ser inteiro, recebido %s", recebido);
+                }
+            }
+            return tipo;
+        }
+        case N_IDENT: {
+            if (strcmp(no->text, "this") == 0) {
+                return "?";
+            }
+            SimboloSemantico *simbolo = buscar_simbolo(contexto, no->text);
+            if (simbolo == NULL) {
+                erro_semantico(contexto->erros, no->line, no->col,
+                               "Identificador '%s' usado antes da declaracao", no->text);
+                return "?";
+            }
+            if (simbolo->categoria == SIMBOLO_METODO) {
+                erro_semantico(contexto->erros, no->line, no->col,
+                               "Metodo '%s' usado como valor sem chamada", no->text);
+                return "?";
+            }
+            return simbolo->tipo;
+        }
+        case N_MEMBER: {
+            if (membro_da_classe(contexto, no)) {
+                SimboloSemantico *membro = buscar_membro(contexto, no->text);
+                if (membro == NULL) {
+                    erro_semantico(contexto->erros, no->line, no->col,
+                                   "Membro '%s' nao declarado na classe", no->text);
+                    return "?";
+                }
+                if (membro->categoria == SIMBOLO_METODO) {
+                    erro_semantico(contexto->erros, no->line, no->col,
+                                   "Metodo '%s' usado como valor sem chamada", no->text);
+                    return "?";
+                }
+                return membro->tipo;
+            }
+            if (primeiro && primeiro->kind == N_IDENT && strcmp(primeiro->text, "System") == 0) {
+                return "builtin";
+            }
+            const char *tipo = tipo_expressao(contexto, primeiro);
+            if (strcmp(no->text, "length") == 0) {
+                size_t tamanho = strlen(tipo);
+                if (strcmp(tipo, "?") != 0 &&
+                    !(tamanho > 2 && strcmp(tipo + tamanho - 2, "[]") == 0)) {
+                    erro_semantico(contexto->erros, no->line, no->col,
+                                   "length exige vetor, recebido %s", tipo);
+                }
+                return "int";
+            }
+            if (strcmp(tipo, "builtin") == 0) {
+                return "builtin";
+            }
+            erro_semantico(contexto->erros, no->line, no->col,
+                           "Acesso ao membro '%s' fora do subconjunto", no->text);
+            return "?";
+        }
+        case N_INDEX: {
+            const char *tipo = tipo_expressao(contexto, primeiro);
+            const char *indice = tipo_expressao(contexto, segundo);
+            size_t tamanho = strlen(tipo);
+            if (!tipo_indice(indice)) {
+                erro_semantico(contexto->erros, no->line, no->col,
+                               "Indice de vetor deve ser inteiro, recebido %s", indice);
+            }
+            if (tamanho > 2 && strcmp(tipo + tamanho - 2, "[]") == 0) {
+                free(no->inferred_type);
+                no->inferred_type = copiar_texto(tipo);
+                no->inferred_type[tamanho - 2] = '\0';
+                return no->inferred_type;
+            }
+            if (strcmp(tipo, "?") != 0) {
+                erro_semantico(contexto->erros, no->line, no->col,
+                               "Indexacao exige vetor, recebido %s", tipo);
+            }
+            return "?";
+        }
+        case N_CALL:
+            return verificar_chamada(contexto, no);
+        case N_BINARY:
+            return verificar_binaria(contexto, no);
+        case N_UNARY: {
+            const char *tipo = tipo_expressao(contexto, primeiro);
+            if (strcmp(no->text, "!") == 0) {
+                if (!booleano_ou_desconhecido(tipo)) {
+                    erro_semantico(contexto->erros, no->line, no->col, "Operador ! exige boolean");
+                }
+                return "boolean";
+            }
+            if (strcmp(no->text, "++") == 0 || strcmp(no->text, "--") == 0) {
+                if (primeiro && !destino_modificavel(contexto, primeiro)) {
+                    erro_semantico(contexto->erros, no->line, no->col,
+                                   "Incremento/decremento exige variavel modificavel");
+                }
+                if (!numero_ou_desconhecido(tipo)) {
+                    erro_semantico(contexto->erros, no->line, no->col,
+                                   "Incremento/decremento exige tipo numerico, recebido %s", tipo);
+                }
+            } else if ((strcmp(no->text, "+") == 0 || strcmp(no->text, "-") == 0) &&
+                       !numero_ou_desconhecido(tipo)) {
+                erro_semantico(contexto->erros, no->line, no->col,
+                               "Operador unario aritmetico exige numero, recebido %s", tipo);
+            }
+            if ((strcmp(no->text, "+") == 0 || strcmp(no->text, "-") == 0) &&
+                (strcmp(tipo, "char") == 0 || strcmp(tipo, "byte") == 0 || strcmp(tipo, "short") == 0)) {
+                return "int";
+            }
+            return tipo;
+        }
+        case N_ASSIGN: {
+            const char *destino = tipo_expressao(contexto, primeiro);
+            const char *origem = tipo_expressao(contexto, segundo);
+            if (primeiro && !destino_modificavel(contexto, primeiro)) {
+                erro_semantico(contexto->erros, no->line, no->col,
+                               "Atribuicao exige destino modificavel");
+            }
+            if (strcmp(no->text, "=") != 0 &&
+                (!numero_ou_desconhecido(destino) || !numero_ou_desconhecido(origem))) {
+                erro_semantico(contexto->erros, no->line, no->col,
+                               "Atribuicao composta %s exige numeros", no->text);
+            }
+            if (!tipos_compativeis(destino, origem)) {
+                erro_semantico(contexto->erros, no->line, no->col,
+                               "Atribuicao incompativel: %s recebe %s", destino, origem);
+            }
+            return destino;
+        }
+        default:
+            return "?";
+    }
+}
+
+static void visitar_instrucao(ContextoSemantico *contexto, const AST *no);
+
+static void visitar_lista(ContextoSemantico *contexto, const AST *no) {
+    for (; no; no = no->next) {
+        visitar_instrucao(contexto, no);
+    }
+}
+
+static void visitar_em_escopo(ContextoSemantico *contexto, const AST *no) {
+    contexto->escopo++;
+    visitar_instrucao(contexto, no);
+    sair_escopo(contexto);
+}
+
+static void verificar_condicao(ContextoSemantico *contexto, AST *condicao,
+                               const AST *instrucao) {
+    const char *tipo = tipo_expressao(contexto, condicao);
+    if (booleano_ou_desconhecido(tipo)) {
+        return;
+    }
+    if (instrucao->kind == N_IF) {
+        erro_semantico(contexto->erros, instrucao->line, instrucao->col,
+                       "Condicao de if deve ser boolean, recebeu %s", tipo);
+    } else if (instrucao->kind == N_WHILE) {
+        erro_semantico(contexto->erros, instrucao->line, instrucao->col,
+                       "Condicao de while deve ser boolean");
+    } else {
+        erro_semantico(contexto->erros, condicao->line, condicao->col,
+                       "Condicao de for deve ser boolean");
+    }
+}
+
+static void verificar_tipo_declarado(ContextoSemantico *contexto, const AST *no,
+                                    const char *categoria) {
+    if (tipo_void(no->type)) {
+        erro_semantico(contexto->erros, no->line, no->col,
+                       "%s '%s' nao pode ter tipo void", categoria, no->text ? no->text : "?");
+    }
+}
+
+static void visitar_instrucao(ContextoSemantico *contexto, const AST *no) {
+    if (no == NULL) {
+        return;
+    }
+    switch (no->kind) {
+        case N_BLOCK:
+            contexto->escopo++;
+            visitar_lista(contexto, no->child);
+            sair_escopo(contexto);
+            break;
+        case N_VAR: {
+            verificar_tipo_declarado(contexto, no, "Variavel");
+            const char *tipo = no->child ? tipo_expressao(contexto, no->child) : NULL;
+            declarar_simbolo(contexto, no, SIMBOLO_VARIAVEL);
+            if (tipo && !tipos_compativeis(no->type, tipo)) {
+                erro_semantico(contexto->erros, no->line, no->col,
+                               "Inicializacao de '%s': %s nao aceita %s", no->text, no->type, tipo);
+            }
+            break;
+        }
+        case N_IF:
+        case N_WHILE: {
+            AST *condicao = no->child;
+            verificar_condicao(contexto, condicao, no);
+            const AST *corpo = condicao ? condicao->next : NULL;
+            visitar_em_escopo(contexto, corpo);
+            if (no->kind == N_IF && corpo && corpo->next) {
+                visitar_em_escopo(contexto, corpo->next);
+            }
+            break;
+        }
+        case N_FOR: {
+            AST *inicio = no->child;
+            AST *condicao = inicio ? inicio->next : NULL;
+            AST *passo = condicao ? condicao->next : NULL;
+            AST *corpo = passo ? passo->next : NULL;
+            contexto->escopo++;
+            if (inicio && inicio->kind == N_VAR) {
+                visitar_instrucao(contexto, inicio);
+            } else if (inicio && inicio->kind != N_EMPTY) {
+                tipo_expressao(contexto, inicio);
+            }
+            if (condicao && condicao->kind != N_EMPTY) {
+                verificar_condicao(contexto, condicao, no);
+            }
+            if (passo && passo->kind != N_EMPTY) {
+                tipo_expressao(contexto, passo);
+            }
+            visitar_instrucao(contexto, corpo);
+            sair_escopo(contexto);
+            break;
+        }
+        case N_RETURN: {
+            const char *tipo = no->child ? tipo_expressao(contexto, no->child) : "void";
+            const char *retorno = contexto->tipo_retorno ? contexto->tipo_retorno : "void";
+            if ((no->child && strcmp(retorno, "void") == 0) || !tipos_compativeis(retorno, tipo)) {
+                erro_semantico(contexto->erros, no->line, no->col,
+                               "Retorno incompativel: metodo retorna %s, expressao %s", retorno, tipo);
+            }
+            break;
+        }
+        case N_EXPR_STMT:
+            tipo_expressao(contexto, no->child);
+            break;
+        default:
+            break;
+    }
+}
+
+static void registrar_membros(ContextoSemantico *contexto, const AST *classe) {
+    for (const AST *no = classe->child; no; no = no->next) {
+        if (no->kind == N_METHOD) {
+            SimboloSemantico *metodo = declarar_simbolo(contexto, no, SIMBOLO_METODO);
+            if (metodo == NULL) {
+                continue;
+            }
+            for (const AST *parametro = no->child;
+                 parametro && parametro->kind == N_PARAM; parametro = parametro->next) {
+                char **parametros = realloc(metodo->parametros,
+                    (size_t)(metodo->total_parametros + 1) * sizeof(*parametros));
+                if (parametros == NULL) {
+                    exit(EXIT_FAILURE);
+                }
+                metodo->parametros = parametros;
+                metodo->parametros[metodo->total_parametros++] = copiar_texto(parametro->type);
+            }
+        } else if (no->kind == N_VAR) {
+            verificar_tipo_declarado(contexto, no, "Campo");
+            declarar_simbolo(contexto, no, SIMBOLO_VARIAVEL);
+        }
+    }
+}
+
+void semantic_check(AST *root, SemanticErrors *errors) {
+    ContextoSemantico contexto = {0};
+    contexto.erros = errors;
+
+    for (const AST *classe = root ? root->child : NULL; classe; classe = classe->next) {
+        contexto.escopo++;
+        contexto.nome_classe = classe->text;
+        registrar_membros(&contexto, classe);
+        for (const AST *no = classe->child; no; no = no->next) {
+            if (no->kind == N_METHOD) {
+                contexto.escopo++;
+                contexto.tipo_retorno = no->type;
+                const AST *parametro = no->child;
+                while (parametro && parametro->kind == N_PARAM) {
+                    verificar_tipo_declarado(&contexto, parametro, "Parametro");
+                    declarar_simbolo(&contexto, parametro, SIMBOLO_VARIAVEL);
+                    parametro = parametro->next;
+                }
+                visitar_lista(&contexto, parametro);
+                sair_escopo(&contexto);
+            } else if (no->kind == N_VAR && no->child) {
+                const char *tipo = tipo_expressao(&contexto, no->child);
+                if (!tipos_compativeis(no->type, tipo)) {
+                    erro_semantico(errors, no->line, no->col, "Campo '%s' incompativel", no->text);
+                }
+            }
+        }
+        sair_escopo(&contexto);
+    }
+
+    while (contexto.escopo >= 0) {
+        sair_escopo(&contexto);
+    }
+    free(contexto.simbolos);
+}
+
+void semantic_errors_free(SemanticErrors *errors) {
+    free(errors->items);
+    memset(errors, 0, sizeof(*errors));
+}

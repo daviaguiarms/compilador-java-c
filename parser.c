@@ -1,97 +1,1522 @@
 #include "parser.h"
+
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdarg.h>
+#include <ctype.h>
 
-typedef struct {const VetorTokens *v; int pos, profundidade; ListaErrosSintaticos *erros;} Parser;
-void vetor_tokens_inicializar(VetorTokens*v){memset(v,0,sizeof(*v));}
-void vetor_tokens_adicionar(VetorTokens*v,Token t){if(v->total==v->capacidade){v->capacidade=v->capacidade?2*v->capacidade:128;v->itens=realloc(v->itens,(size_t)v->capacidade*sizeof(Token));if(!v->itens){fprintf(stderr,"Memoria insuficiente\n");exit(3);}}v->itens[v->total++]=t;}
-void vetor_tokens_liberar(VetorTokens*v){for(int i=0;i<v->total;i++)free(v->itens[i].lexema);free(v->itens);memset(v,0,sizeof(*v));}
-void erros_sintaticos_liberar(ListaErrosSintaticos*e){free(e->itens);memset(e,0,sizeof(*e));}
-static const Token *at(Parser*p,int n){int i=p->pos+n; if(i<0)i=0;if(i>=p->v->total)i=p->v->total-1;return &p->v->itens[i];}
-static const char *lex(Parser*p,int n){return at(p,n)->lexema;}
-static int is(Parser*p,const char*s){return strcmp(lex(p,0),s)==0;}
-static int eof(Parser*p){return at(p,0)->tipo==TOK_FIM_ARQUIVO;}
-static void advance(Parser*p){if(!eof(p))p->pos++;}
-static int match(Parser*p,const char*s){if(is(p,s)){advance(p);return 1;}return 0;}
-static void error(Parser*p,const char*fmt,...){const Token*t=at(p,0);if(p->erros->total>=100)return;ListaErrosSintaticos*e=p->erros;if(e->total==e->capacidade){e->capacidade=e->capacidade?e->capacidade*2:16;e->itens=realloc(e->itens,(size_t)e->capacidade*sizeof(ErroSintatico));if(!e->itens)exit(3);}ErroSintatico*x=&e->itens[e->total++];x->linha=t->linha;x->coluna=t->coluna;va_list ap;va_start(ap,fmt);vsnprintf(x->mensagem,sizeof(x->mensagem),fmt,ap);va_end(ap);}
-static int expect(Parser*p,const char*s){if(match(p,s))return 1;error(p,"Esperado '%s', encontrado '%s'",s,lex(p,0));return 0;}
-static int identifier(Parser*p){return at(p,0)->tipo==TOK_IDENTIFICADOR || is(p,"var") || is(p,"record");}
-static int expect_id(Parser*p){if(identifier(p)){advance(p);return 1;}error(p,"Identificador esperado, encontrado '%s'",lex(p,0));return 0;}
-static int type_start(Parser*p){const char *s=lex(p,0);return identifier(p)||!strcmp(s,"int")||!strcmp(s,"long")||!strcmp(s,"byte")||!strcmp(s,"short")||!strcmp(s,"boolean")||!strcmp(s,"char")||!strcmp(s,"double")||!strcmp(s,"float")||!strcmp(s,"void");}
-static int primitive(Parser*p){const char*s=lex(p,0);return !strcmp(s,"int")||!strcmp(s,"long")||!strcmp(s,"byte")||!strcmp(s,"short")||!strcmp(s,"boolean")||!strcmp(s,"char")||!strcmp(s,"double")||!strcmp(s,"float")||!strcmp(s,"void");}
-static int modifier(Parser*p){const char*s=lex(p,0);return !strcmp(s,"public")||!strcmp(s,"private")||!strcmp(s,"protected")||!strcmp(s,"static")||!strcmp(s,"final")||!strcmp(s,"abstract")||!strcmp(s,"native")||!strcmp(s,"synchronized")||!strcmp(s,"strictfp")||!strcmp(s,"transient")||!strcmp(s,"volatile")||!strcmp(s,"default");}
-static void expr(Parser*p,int minprec);
-static void statement(Parser*p);
-static void type(Parser*p);
-static void annotation(Parser*p){expect(p,"@");expect_id(p);while(match(p,"."))expect_id(p);if(match(p,"(")){if(!is(p,")")){expr(p,1);while(match(p,","))expr(p,1);}expect(p,")");}}
-static void modifiers(Parser*p){while(modifier(p)||is(p,"@")){if(is(p,"@"))annotation(p);else advance(p);}}
-static void qualified(Parser*p){expect_id(p);while(match(p,"."))expect_id(p);}
+typedef struct {
+    const VetorTokens *tokens;
+    int posicao;
+    int profundidade;
+    ListaErrosSintaticos *erros;
+} Parser;
 
-static void generic(Parser*p){if(!match(p,"<"))return;int depth=1;while(!eof(p)&&depth){if(is(p,"<")){depth++;advance(p);}else if(is(p,">")){depth--;advance(p);}else if(is(p,">>")||is(p,">>>")){depth-=is(p,">>")?2:3;advance(p);}else advance(p);}if(depth!=0)error(p,"Lista de tipos genericos nao fechada corretamente");}
-static void type(Parser*p){if(!type_start(p)){error(p,"Tipo esperado, encontrado '%s'",lex(p,0));return;}int prim=primitive(p);advance(p);if(!prim){while(match(p,"."))expect_id(p);generic(p);}while(match(p,"["))expect(p,"]");}
-static int precedence(const char*s){if(!strcmp(s,"=")||!strcmp(s,"+=")||!strcmp(s,"-=")||!strcmp(s,"*=")||!strcmp(s,"/=")||!strcmp(s,"%=")||!strcmp(s,"&=")||!strcmp(s,"|=")||!strcmp(s,"^=")||!strcmp(s,"<<=")||!strcmp(s,">>=")||!strcmp(s,">>>="))return 1;
-if(!strcmp(s,"?"))return 2;
-if(!strcmp(s,"||"))return 3;
-if(!strcmp(s,"&&"))return 4;
-if(!strcmp(s,"|"))return 5;
-if(!strcmp(s,"^"))return 6;
-if(!strcmp(s,"&"))return 7;
-if(!strcmp(s,"==")||!strcmp(s,"!="))return 8;
-if(!strcmp(s,"<")||!strcmp(s,">")||!strcmp(s,"<=")||!strcmp(s,">=")||!strcmp(s,"instanceof"))return 9;
-if(!strcmp(s,"<<")||!strcmp(s,">>")||!strcmp(s,">>>"))return 10;
-if(!strcmp(s,"+")||!strcmp(s,"-"))return 11;
-if(!strcmp(s,"*")||!strcmp(s,"/")||!strcmp(s,"%"))return 12;
-return 0;}
-static int literal(Parser*p){TipoToken t=at(p,0)->tipo;return t==TOK_LITERAL_INTEIRO||t==TOK_LITERAL_DECIMAL||t==TOK_LITERAL_TEXTO||t==TOK_LITERAL_CARACTERE||t==TOK_LITERAL_BOOLEANO||t==TOK_LITERAL_NULO;}
-static void initializer(Parser*p){if(match(p,"{")){if(!is(p,"}")){initializer(p);while(match(p,",")){if(is(p,"}"))break;initializer(p);}}expect(p,"}");}else expr(p,1);}
-static void arguments(Parser*p){expect(p,"(");if(!is(p,")")){expr(p,1);while(match(p,","))expr(p,1);}expect(p,")");}
-static void primary(Parser*p){if(p->profundidade++>160){error(p,"Limite de aninhamento sintatico excedido");p->profundidade--;return;}
-if(literal(p)||identifier(p)||is(p,"this")||is(p,"super")){advance(p);}
-else if(match(p,"new")){if(type_start(p)){int prim=primitive(p);advance(p);if(!prim){while(match(p,"."))expect_id(p);generic(p);}}else error(p,"Tipo esperado apos new");if(is(p,"(")){arguments(p);if(is(p,"{")){int d=0;do{if(is(p,"{"))d++;else if(is(p,"}"))d--;advance(p);}while(!eof(p)&&d);}}else if(match(p,"[")){if(!is(p,"]"))expr(p,1);expect(p,"]");while(match(p,"[")){if(!is(p,"]"))expr(p,1);expect(p,"]");}if(is(p,"{"))initializer(p);}else error(p,"Esperado construtor ou indice apos 'new'");}
-else if(match(p,"(")){
-int save=p->pos;int ok=1;while(!eof(p)&&!is(p,")")&&p->pos-save<24){if(!identifier(p)&&!type_start(p)&&!is(p,",")&&!is(p,"[")&&!is(p,"]"))ok=0;advance(p);}if(!is(p,")")||strcmp(lex(p,1),"->"))ok=0;p->pos=save;if(ok){while(!is(p,")")&&!eof(p))advance(p);expect(p,")");expect(p,"->");if(is(p,"{"))statement(p);else expr(p,1);}else{expr(p,1);expect(p,")");}}
-else if(match(p,"{")){if(!is(p,"}")){initializer(p);while(match(p,","))initializer(p);}expect(p,"}");}
-else{error(p,"Expressao esperada, encontrado '%s'",lex(p,0));if(!eof(p))advance(p);}
-while(!eof(p)){
-if(is(p,"(")){arguments(p);}else if(match(p,".")){if(is(p,"class")){advance(p);}else expect_id(p);}else if(match(p,"[")){expr(p,1);expect(p,"]");}else if(match(p,"::")){if(is(p,"new"))advance(p);else expect_id(p);}else if(match(p,"++")||match(p,"--")){}else if(match(p,"->")){if(is(p,"{"))statement(p);else expr(p,1);}else break;}
-p->profundidade--;}
-static void unary(Parser*p){if(is(p,"!")||is(p,"~")||is(p,"+")||is(p,"-")||is(p,"++")||is(p,"--")){advance(p);unary(p);}else primary(p);}
-static void expr(Parser*p,int minprec){int before=p->pos;unary(p);while(!eof(p)){int prec=precedence(lex(p,0));if(prec<minprec)break;char op[16];snprintf(op,sizeof(op),"%s",lex(p,0));advance(p);if(!strcmp(op,"?")){expr(p,1);expect(p,":");expr(p,2);}else if(!strcmp(op,"instanceof")){type(p);}else{int right=(prec==1);expr(p,prec+(right?0:1));}if(p->pos==before)break;}}
-static void var_tail(Parser*p){while(match(p,"["))expect(p,"]");if(match(p,"="))initializer(p);while(match(p,",")){expect_id(p);while(match(p,"["))expect(p,"]");if(match(p,"="))initializer(p);}}
-static int declaration_lookahead(Parser*p){int i=p->pos, limit=0;if(modifier(p))return 1;if(!type_start(p))return 0;
-if(primitive(p)||identifier(p)){advance(p);while(match(p,".")) {if(!identifier(p))break;advance(p);}if(is(p,"<")){int d=0;do{if(is(p,"<"))d++;if(is(p,">"))d--;if(is(p,">>"))d-=2;if(is(p,">>>"))d-=3;advance(p);}while(!eof(p)&&d>0&&++limit<80);}while(match(p,"[")){if(!match(p,"]"))break;}}
-int ok=identifier(p);p->pos=i;return ok;}
-static void var_declaration(Parser*p,int terminator){type(p);expect_id(p);var_tail(p);if(terminator)expect(p,";");}
-static void block(Parser*p){expect(p,"{");int n=0;while(!eof(p)&&!is(p,"}")&&n++<100000){int before=p->pos;statement(p);if(p->pos==before){error(p,"Nao foi possivel avancar na instrucao");advance(p);}}expect(p,"}");}
-static void statement(Parser*p){if(eof(p))return;if(is(p,"{")){block(p);return;}if(match(p,";"))return;
-if(match(p,"if")){expect(p,"(");expr(p,1);expect(p,")");statement(p);if(match(p,"else"))statement(p);return;}
-if(match(p,"while")||match(p,"switch")||match(p,"synchronized")){expect(p,"(");expr(p,1);expect(p,")");statement(p);return;}
-if(match(p,"for")){expect(p,"(");if(!is(p,";")){if(declaration_lookahead(p))var_declaration(p,0);else{expr(p,1);while(match(p,","))expr(p,1);}}if(match(p,":")){expr(p,1);expect(p,")");statement(p);return;}expect(p,";");if(!is(p,";"))expr(p,1);expect(p,";");if(!is(p,")")){expr(p,1);while(match(p,","))expr(p,1);}expect(p,")");statement(p);return;}
-if(match(p,"do")){statement(p);expect(p,"while");expect(p,"(");expr(p,1);expect(p,")");expect(p,";");return;}
-if(match(p,"return")||match(p,"throw")){if(!is(p,";"))expr(p,1);expect(p,";");return;}
-if(match(p,"break")||match(p,"continue")){if(identifier(p))advance(p);expect(p,";");return;}
-if(match(p,"try")){if(match(p,"(")){while(!eof(p)&&!is(p,")"))advance(p);expect(p,")");}block(p);while(match(p,"catch")){expect(p,"(");type(p);expect_id(p);expect(p,")");block(p);}if(match(p,"finally"))block(p);return;}
-if(match(p,"assert")){expr(p,1);if(match(p,":"))expr(p,1);expect(p,";");return;}
-if(declaration_lookahead(p)){modifiers(p);var_declaration(p,1);return;}
-if(identifier(p)&&!strcmp(lex(p,1),":")){advance(p);advance(p);statement(p);return;}
-expr(p,1);expect(p,";");}
-static void params(Parser*p){expect(p,"(");if(!is(p,")")){do{modifiers(p);type(p);match(p,"...");expect_id(p);while(match(p,"["))expect(p,"]");}while(match(p,","));}expect(p,")");}
-static void member(Parser*p,const char*class_name){modifiers(p);if(is(p,"}"))return;if(match(p,";"))return;
-if(is(p,"class")||is(p,"interface")||is(p,"enum")){advance(p);expect_id(p);while(!eof(p)&&!is(p,"{"))advance(p);if(is(p,"{"))block(p);return;}
-if(is(p,"{")){block(p);return;}
-if(identifier(p)&&!strcmp(lex(p,0),class_name)&&!strcmp(lex(p,1),"(")){advance(p);params(p);if(is(p,"{"))block(p);else expect(p,";");return;}
-if(!type_start(p)){error(p,"Tipo ou membro esperado, encontrado '%s'",lex(p,0));advance(p);return;}
-type(p);if(!expect_id(p)){while(!eof(p)&&!is(p,";")&&!is(p,"}"))advance(p);match(p,";");return;}
-if(is(p,"(")){params(p);if(match(p,"throws")){qualified(p);while(match(p,","))qualified(p);}if(is(p,"{"))block(p);else expect(p,";");}
-else{var_tail(p);expect(p,";");}}
-static void class_decl(Parser*p){modifiers(p);int kind=0;if(match(p,"class"))kind=1;else if(match(p,"interface"))kind=2;else if(match(p,"enum"))kind=3;else{error(p,"Declaracao de classe, interface ou enum esperada");advance(p);return;}
-char name[256]="";if(identifier(p)){snprintf(name,sizeof(name),"%s",lex(p,0));advance(p);}else expect_id(p);generic(p);
-if(match(p,"extends")){type(p);while(match(p,","))type(p);}if(match(p,"implements")){type(p);while(match(p,","))type(p);}if(!expect(p,"{"))return;
-int count=0;while(!eof(p)&&!is(p,"}")&&count++<100000){int old=p->pos;if(kind==3&&identifier(p)&&(!strcmp(lex(p,1),",")||!strcmp(lex(p,1),";")||!strcmp(lex(p,1),"}"))){advance(p);if(!match(p,","))match(p,";");continue;}member(p,name);if(p->pos==old)advance(p);}expect(p,"}");}
-void analisar_sintaxe(const VetorTokens*tokens,ListaErrosSintaticos*erros){memset(erros,0,sizeof(*erros));if(tokens->total==0)return;Parser p={tokens,0,0,erros};
-if(match(&p,"package")){qualified(&p);expect(&p,";");}
-while(match(&p,"import")){match(&p,"static");expect_id(&p);while(match(&p,".")){if(match(&p,"*"))break;expect_id(&p);}expect(&p,";");}
-while(!eof(&p)){int before=p.pos;if(match(&p,";"))continue;class_decl(&p);if(p.pos==before)advance(&p);}
+static const Token *token_relativo(Parser *parser, int deslocamento) {
+    int indice = parser->posicao + deslocamento;
+
+    if (indice < 0) {
+        indice = 0;
+    }
+    if (indice >= parser->tokens->total) {
+        indice = parser->tokens->total - 1;
+    }
+    return &parser->tokens->itens[indice];
+}
+
+static const Token *token_atual(Parser *parser) {
+    return token_relativo(parser, 0);
+}
+
+static const char *lexema_relativo(Parser *parser, int deslocamento) {
+    return token_relativo(parser, deslocamento)->lexema;
+}
+
+static const char *lexema_atual(Parser *parser) {
+    return lexema_relativo(parser, 0);
+}
+
+static int esta_no_fim(Parser *parser) {
+    return token_atual(parser)->tipo == TOK_FIM_ARQUIVO;
+}
+
+static int lexema_e(Parser *parser, const char *texto) {
+    return strcmp(lexema_atual(parser), texto) == 0;
+}
+
+static void avancar(Parser *parser) {
+    if (!esta_no_fim(parser)) {
+        parser->posicao++;
+    }
+}
+
+static int consumir(Parser *parser, const char *texto) {
+    if (lexema_e(parser, texto)) {
+        avancar(parser);
+        return 1;
+    }
+    return 0;
+}
+
+static void registrar_erro_sintatico(Parser *parser, const char *formato, ...) {
+    const Token *token = token_atual(parser);
+    ListaErrosSintaticos *erros = parser->erros;
+    ErroSintatico *erro;
+    va_list argumentos;
+
+    if (erros->total >= 100) {
+        return;
+    }
+
+    if (erros->total == erros->capacidade) {
+        int nova_capacidade = erros->capacidade ? erros->capacidade * 2 : 16;
+        ErroSintatico *novos_itens = (ErroSintatico *)realloc(
+            erros->itens,
+            (size_t)nova_capacidade * sizeof(ErroSintatico)
+        );
+        if (novos_itens == NULL) {
+            exit(3);
+        }
+        erros->itens = novos_itens;
+        erros->capacidade = nova_capacidade;
+    }
+
+    erro = &erros->itens[erros->total];
+    erro->linha = token->linha;
+    erro->coluna = token->coluna;
+
+    va_start(argumentos, formato);
+    vsnprintf(erro->mensagem, sizeof(erro->mensagem), formato, argumentos);
+    va_end(argumentos);
+
+    erros->total++;
+}
+
+static int entrar_regra(Parser *parser) {
+    if (parser->profundidade >= 128) {
+        registrar_erro_sintatico(parser, "Limite de aninhamento sintatico excedido");
+        parser->posicao = parser->tokens->total - 1;
+        return 0;
+    }
+    parser->profundidade++;
+    return 1;
+}
+
+static int exigir(Parser *parser, const char *texto) {
+    if (consumir(parser, texto)) {
+        return 1;
+    }
+    registrar_erro_sintatico(parser, "Esperado '%s', encontrado '%s'", texto, lexema_atual(parser));
+    return 0;
+}
+
+static int e_identificador(Parser *parser) {
+    return token_atual(parser)->tipo == TOK_IDENTIFICADOR ||
+           lexema_e(parser, "var") ||
+           lexema_e(parser, "record");
+}
+
+static int exigir_identificador(Parser *parser) {
+    if (e_identificador(parser)) {
+        avancar(parser);
+        return 1;
+    }
+    registrar_erro_sintatico(parser, "Identificador esperado, encontrado '%s'", lexema_atual(parser));
+    return 0;
+}
+
+static int inicia_tipo(Parser *parser) {
+    const char *texto = lexema_atual(parser);
+
+    return e_identificador(parser) ||
+           strcmp(texto, "int") == 0 ||
+           strcmp(texto, "long") == 0 ||
+           strcmp(texto, "byte") == 0 ||
+           strcmp(texto, "short") == 0 ||
+           strcmp(texto, "boolean") == 0 ||
+           strcmp(texto, "char") == 0 ||
+           strcmp(texto, "double") == 0 ||
+           strcmp(texto, "float") == 0 ||
+           strcmp(texto, "void") == 0;
+}
+
+static int e_primitivo(Parser *parser) {
+    const char *texto = lexema_atual(parser);
+
+    return strcmp(texto, "int") == 0 ||
+           strcmp(texto, "long") == 0 ||
+           strcmp(texto, "byte") == 0 ||
+           strcmp(texto, "short") == 0 ||
+           strcmp(texto, "boolean") == 0 ||
+           strcmp(texto, "char") == 0 ||
+           strcmp(texto, "double") == 0 ||
+           strcmp(texto, "float") == 0 ||
+           strcmp(texto, "void") == 0;
+}
+
+static int e_modificador(Parser *parser) {
+    const char *texto = lexema_atual(parser);
+
+    return strcmp(texto, "public") == 0 ||
+           strcmp(texto, "private") == 0 ||
+           strcmp(texto, "protected") == 0 ||
+           strcmp(texto, "static") == 0 ||
+           strcmp(texto, "final") == 0 ||
+           strcmp(texto, "abstract") == 0 ||
+           strcmp(texto, "native") == 0 ||
+           strcmp(texto, "synchronized") == 0 ||
+           strcmp(texto, "strictfp") == 0 ||
+           strcmp(texto, "transient") == 0 ||
+           strcmp(texto, "volatile") == 0 ||
+           strcmp(texto, "default") == 0;
+}
+
+static void parse_expression(Parser *parser, int precedencia_minima);
+static void parse_statement(Parser *parser);
+static void parse_type(Parser *parser);
+
+static void parse_annotation(Parser *parser) {
+    exigir(parser, "@");
+    exigir_identificador(parser);
+
+    while (consumir(parser, ".")) {
+        exigir_identificador(parser);
+    }
+
+    if (consumir(parser, "(")) {
+        if (!lexema_e(parser, ")")) {
+            parse_expression(parser, 1);
+            while (consumir(parser, ",")) {
+                parse_expression(parser, 1);
+            }
+        }
+        exigir(parser, ")");
+    }
+}
+
+static void parse_modifiers(Parser *parser) {
+    while (e_modificador(parser) || lexema_e(parser, "@")) {
+        if (lexema_e(parser, "@")) {
+            parse_annotation(parser);
+        } else {
+            avancar(parser);
+        }
+    }
+}
+
+static void parse_qualified_name(Parser *parser) {
+    exigir_identificador(parser);
+
+    while (consumir(parser, ".")) {
+        exigir_identificador(parser);
+    }
+}
+
+static void parse_generic(Parser *parser) {
+    int profundidade;
+
+    if (!consumir(parser, "<")) {
+        return;
+    }
+
+    profundidade = 1;
+    while (!esta_no_fim(parser) && profundidade > 0) {
+        if (lexema_e(parser, "<")) {
+            profundidade++;
+            avancar(parser);
+        } else if (lexema_e(parser, ">")) {
+            profundidade--;
+            avancar(parser);
+        } else if (lexema_e(parser, ">>")) {
+            profundidade -= 2;
+            avancar(parser);
+        } else if (lexema_e(parser, ">>>")) {
+            profundidade -= 3;
+            avancar(parser);
+        } else {
+            avancar(parser);
+        }
+    }
+
+    if (profundidade != 0) {
+        registrar_erro_sintatico(parser, "Lista de tipos genericos nao fechada corretamente");
+    }
+}
+
+static void parse_type(Parser *parser) {
+    int primitivo;
+
+    if (!inicia_tipo(parser)) {
+        registrar_erro_sintatico(parser, "Tipo esperado, encontrado '%s'", lexema_atual(parser));
+        return;
+    }
+
+    primitivo = e_primitivo(parser);
+    avancar(parser);
+
+    if (!primitivo) {
+        while (consumir(parser, ".")) {
+            exigir_identificador(parser);
+        }
+        parse_generic(parser);
+    }
+
+    while (consumir(parser, "[")) {
+        exigir(parser, "]");
+    }
+}
+
+typedef struct {
+    const char *operador;
+    int valor;
+} PrecedenciaOperador;
+
+static const PrecedenciaOperador PRECEDENCIAS[] = {
+    { "=", 1 },
+    { "+=", 1 },
+    { "-=", 1 },
+    { "*=", 1 },
+    { "/=", 1 },
+    { "%=", 1 },
+    { "&=", 1 },
+    { "|=", 1 },
+    { "^=", 1 },
+    { "<<=", 1 },
+    { ">>=", 1 },
+    { ">>>=", 1 },
+    { "?", 2 },
+    { "||", 3 },
+    { "&&", 4 },
+    { "|", 5 },
+    { "^", 6 },
+    { "&", 7 },
+    { "==", 8 },
+    { "!=", 8 },
+    { "<", 9 },
+    { ">", 9 },
+    { "<=", 9 },
+    { ">=", 9 },
+    { "instanceof", 9 },
+    { "<<", 10 },
+    { ">>", 10 },
+    { ">>>", 10 },
+    { "+", 11 },
+    { "-", 11 },
+    { "*", 12 },
+    { "/", 12 },
+    { "%", 12 }
+};
+
+static int precedencia(const char *operador) {
+    size_t i;
+
+    for (i = 0; i < sizeof(PRECEDENCIAS) / sizeof(PRECEDENCIAS[0]); i++) {
+        if (strcmp(operador, PRECEDENCIAS[i].operador) == 0) {
+            return PRECEDENCIAS[i].valor;
+        }
+    }
+    return 0;
+}
+
+static int e_literal(Parser *parser) {
+    TipoToken tipo = token_atual(parser)->tipo;
+
+    return tipo == TOK_LITERAL_INTEIRO ||
+           tipo == TOK_LITERAL_DECIMAL ||
+           tipo == TOK_LITERAL_TEXTO ||
+           tipo == TOK_LITERAL_CARACTERE ||
+           tipo == TOK_LITERAL_BOOLEANO ||
+           tipo == TOK_LITERAL_NULO;
+}
+
+static void parse_initializer(Parser *parser) {
+    if (!entrar_regra(parser)) {
+        return;
+    }
+    if (consumir(parser, "{")) {
+        if (!lexema_e(parser, "}")) {
+            parse_initializer(parser);
+            while (consumir(parser, ",")) {
+                if (lexema_e(parser, "}")) {
+                    break;
+                }
+                parse_initializer(parser);
+            }
+        }
+        exigir(parser, "}");
+    } else {
+        parse_expression(parser, 1);
+    }
+    parser->profundidade--;
+}
+
+static void parse_arguments(Parser *parser) {
+    exigir(parser, "(");
+
+    if (!lexema_e(parser, ")")) {
+        parse_expression(parser, 1);
+        while (consumir(parser, ",")) {
+            parse_expression(parser, 1);
+        }
+    }
+
+    exigir(parser, ")");
+}
+
+static int parece_lambda(Parser *parser) {
+    int posicao_inicial = parser->posicao;
+    int valido = 1;
+
+    while (!esta_no_fim(parser) &&
+           !lexema_e(parser, ")") &&
+           parser->posicao - posicao_inicial < 24) {
+        if (!e_identificador(parser) &&
+            !inicia_tipo(parser) &&
+            !lexema_e(parser, ",") &&
+            !lexema_e(parser, "[") &&
+            !lexema_e(parser, "]")) {
+            valido = 0;
+        }
+        avancar(parser);
+    }
+
+    if (!lexema_e(parser, ")") || strcmp(lexema_relativo(parser, 1), "->") != 0) {
+        valido = 0;
+    }
+
+    parser->posicao = posicao_inicial;
+    return valido;
+}
+
+static void parse_primary(Parser *parser) {
+    if (!entrar_regra(parser)) {
+        return;
+    }
+
+    if (e_literal(parser) ||
+        e_identificador(parser) ||
+        lexema_e(parser, "this") ||
+        lexema_e(parser, "super")) {
+        avancar(parser);
+    } else if (consumir(parser, "new")) {
+        if (inicia_tipo(parser)) {
+            int primitivo = e_primitivo(parser);
+            avancar(parser);
+            if (!primitivo) {
+                while (consumir(parser, ".")) {
+                    exigir_identificador(parser);
+                }
+                parse_generic(parser);
+            }
+        } else {
+            registrar_erro_sintatico(parser, "Tipo esperado apos new");
+        }
+
+        if (lexema_e(parser, "(")) {
+            parse_arguments(parser);
+            if (lexema_e(parser, "{")) {
+                int profundidade = 0;
+                do {
+                    if (lexema_e(parser, "{")) {
+                        profundidade++;
+                    } else if (lexema_e(parser, "}")) {
+                        profundidade--;
+                    }
+                    avancar(parser);
+                } while (!esta_no_fim(parser) && profundidade > 0);
+            }
+        } else if (consumir(parser, "[")) {
+            if (!lexema_e(parser, "]")) {
+                parse_expression(parser, 1);
+            }
+            exigir(parser, "]");
+
+            while (consumir(parser, "[")) {
+                if (!lexema_e(parser, "]")) {
+                    parse_expression(parser, 1);
+                }
+                exigir(parser, "]");
+            }
+
+            if (lexema_e(parser, "{")) {
+                parse_initializer(parser);
+            }
+        } else {
+            registrar_erro_sintatico(parser, "Esperado construtor ou indice apos 'new'");
+        }
+    } else if (consumir(parser, "(")) {
+        if (parece_lambda(parser)) {
+            while (!lexema_e(parser, ")") && !esta_no_fim(parser)) {
+                avancar(parser);
+            }
+            exigir(parser, ")");
+            exigir(parser, "->");
+
+            if (lexema_e(parser, "{")) {
+                parse_statement(parser);
+            } else {
+                parse_expression(parser, 1);
+            }
+        } else {
+            parse_expression(parser, 1);
+            exigir(parser, ")");
+        }
+    } else if (consumir(parser, "{")) {
+        if (!lexema_e(parser, "}")) {
+            parse_initializer(parser);
+            while (consumir(parser, ",")) {
+                parse_initializer(parser);
+            }
+        }
+        exigir(parser, "}");
+    } else {
+        registrar_erro_sintatico(parser, "Expressao esperada, encontrado '%s'", lexema_atual(parser));
+        if (!esta_no_fim(parser)) {
+            avancar(parser);
+        }
+    }
+
+    while (!esta_no_fim(parser)) {
+        if (lexema_e(parser, "(")) {
+            parse_arguments(parser);
+        } else if (consumir(parser, ".")) {
+            if (lexema_e(parser, "class")) {
+                avancar(parser);
+            } else {
+                exigir_identificador(parser);
+            }
+        } else if (consumir(parser, "[")) {
+            parse_expression(parser, 1);
+            exigir(parser, "]");
+        } else if (consumir(parser, "::")) {
+            if (lexema_e(parser, "new")) {
+                avancar(parser);
+            } else {
+                exigir_identificador(parser);
+            }
+        } else if (consumir(parser, "++") || consumir(parser, "--")) {
+            continue;
+        } else if (consumir(parser, "->")) {
+            if (lexema_e(parser, "{")) {
+                parse_statement(parser);
+            } else {
+                parse_expression(parser, 1);
+            }
+        } else {
+            break;
+        }
+    }
+
+    parser->profundidade--;
+}
+
+static void parse_unary(Parser *parser) {
+    if (!entrar_regra(parser)) {
+        return;
+    }
+    if (lexema_e(parser, "!") ||
+        lexema_e(parser, "~") ||
+        lexema_e(parser, "+") ||
+        lexema_e(parser, "-") ||
+        lexema_e(parser, "++") ||
+        lexema_e(parser, "--")) {
+        avancar(parser);
+        parse_unary(parser);
+    } else {
+        parse_primary(parser);
+    }
+    parser->profundidade--;
+}
+
+static void parse_expression(Parser *parser, int precedencia_minima) {
+    if (!entrar_regra(parser)) {
+        return;
+    }
+    int posicao_inicial = parser->posicao;
+
+    parse_unary(parser);
+
+    while (!esta_no_fim(parser)) {
+        int precedencia_atual = precedencia(lexema_atual(parser));
+        char operador[16];
+        int associativo_direita;
+
+        if (precedencia_atual < precedencia_minima) {
+            break;
+        }
+
+        snprintf(operador, sizeof(operador), "%s", lexema_atual(parser));
+        avancar(parser);
+
+        if (strcmp(operador, "?") == 0) {
+            parse_expression(parser, 1);
+            exigir(parser, ":");
+            parse_expression(parser, 2);
+        } else if (strcmp(operador, "instanceof") == 0) {
+            parse_type(parser);
+        } else {
+            associativo_direita = (precedencia_atual == 1);
+            parse_expression(parser, precedencia_atual + (associativo_direita ? 0 : 1));
+        }
+
+        if (parser->posicao == posicao_inicial) {
+            break;
+        }
+    }
+    parser->profundidade--;
+}
+
+static void parse_var_tail(Parser *parser) {
+    while (consumir(parser, "[")) {
+        exigir(parser, "]");
+    }
+
+    if (consumir(parser, "=")) {
+        parse_initializer(parser);
+    }
+
+    while (consumir(parser, ",")) {
+        exigir_identificador(parser);
+        while (consumir(parser, "[")) {
+            exigir(parser, "]");
+        }
+        if (consumir(parser, "=")) {
+            parse_initializer(parser);
+        }
+    }
+}
+
+static int parece_declaracao(Parser *parser) {
+    int posicao_inicial = parser->posicao;
+    int limite = 0;
+    int ok;
+
+    if (e_modificador(parser)) {
+        return 1;
+    }
+
+    if (!inicia_tipo(parser)) {
+        return 0;
+    }
+
+    if (e_primitivo(parser) || e_identificador(parser)) {
+        avancar(parser);
+
+        while (consumir(parser, ".")) {
+            if (!e_identificador(parser)) {
+                break;
+            }
+            avancar(parser);
+        }
+
+        if (lexema_e(parser, "<")) {
+            int profundidade = 0;
+            do {
+                if (lexema_e(parser, "<")) {
+                    profundidade++;
+                }
+                if (lexema_e(parser, ">")) {
+                    profundidade--;
+                }
+                if (lexema_e(parser, ">>")) {
+                    profundidade -= 2;
+                }
+                if (lexema_e(parser, ">>>")) {
+                    profundidade -= 3;
+                }
+                avancar(parser);
+            } while (!esta_no_fim(parser) && profundidade > 0 && ++limite < 80);
+        }
+
+        while (consumir(parser, "[")) {
+            if (!consumir(parser, "]")) {
+                break;
+            }
+        }
+    }
+
+    ok = e_identificador(parser);
+    parser->posicao = posicao_inicial;
+    return ok;
+}
+
+static void parse_var_declaration(Parser *parser, int termina_com_ponto_virgula) {
+    parse_type(parser);
+    exigir_identificador(parser);
+    parse_var_tail(parser);
+
+    if (termina_com_ponto_virgula) {
+        exigir(parser, ";");
+    }
+}
+
+static void parse_block(Parser *parser) {
+    int contador = 0;
+
+    exigir(parser, "{");
+
+    while (!esta_no_fim(parser) &&
+           !lexema_e(parser, "}") &&
+           contador++ < 100000) {
+        int posicao_inicial = parser->posicao;
+
+        parse_statement(parser);
+
+        if (parser->posicao == posicao_inicial) {
+            registrar_erro_sintatico(parser, "Nao foi possivel avancar na instrucao");
+            avancar(parser);
+        }
+    }
+
+    exigir(parser, "}");
+}
+
+static void parse_statement_impl(Parser *parser);
+
+static void parse_statement(Parser *parser) {
+    if (!entrar_regra(parser)) {
+        return;
+    }
+    parse_statement_impl(parser);
+    parser->profundidade--;
+}
+
+static void parse_statement_impl(Parser *parser) {
+    if (esta_no_fim(parser)) {
+        return;
+    }
+
+    if (lexema_e(parser, "{")) {
+        parse_block(parser);
+        return;
+    }
+
+    if (consumir(parser, ";")) {
+        return;
+    }
+
+    if (consumir(parser, "if")) {
+        exigir(parser, "(");
+        parse_expression(parser, 1);
+        exigir(parser, ")");
+        parse_statement(parser);
+        if (consumir(parser, "else")) {
+            parse_statement(parser);
+        }
+        return;
+    }
+
+    if (consumir(parser, "while") ||
+        consumir(parser, "switch") ||
+        consumir(parser, "synchronized")) {
+        exigir(parser, "(");
+        parse_expression(parser, 1);
+        exigir(parser, ")");
+        parse_statement(parser);
+        return;
+    }
+
+    if (consumir(parser, "for")) {
+        exigir(parser, "(");
+
+        if (!lexema_e(parser, ";")) {
+            if (parece_declaracao(parser)) {
+                parse_var_declaration(parser, 0);
+            } else {
+                parse_expression(parser, 1);
+                while (consumir(parser, ",")) {
+                    parse_expression(parser, 1);
+                }
+            }
+        }
+
+        if (consumir(parser, ":")) {
+            parse_expression(parser, 1);
+            exigir(parser, ")");
+            parse_statement(parser);
+            return;
+        }
+
+        exigir(parser, ";");
+
+        if (!lexema_e(parser, ";")) {
+            parse_expression(parser, 1);
+        }
+        exigir(parser, ";");
+
+        if (!lexema_e(parser, ")")) {
+            parse_expression(parser, 1);
+            while (consumir(parser, ",")) {
+                parse_expression(parser, 1);
+            }
+        }
+        exigir(parser, ")");
+
+        parse_statement(parser);
+        return;
+    }
+
+    if (consumir(parser, "do")) {
+        parse_statement(parser);
+        exigir(parser, "while");
+        exigir(parser, "(");
+        parse_expression(parser, 1);
+        exigir(parser, ")");
+        exigir(parser, ";");
+        return;
+    }
+
+    if (consumir(parser, "return") || consumir(parser, "throw")) {
+        if (!lexema_e(parser, ";")) {
+            parse_expression(parser, 1);
+        }
+        exigir(parser, ";");
+        return;
+    }
+
+    if (consumir(parser, "break") || consumir(parser, "continue")) {
+        if (e_identificador(parser)) {
+            avancar(parser);
+        }
+        exigir(parser, ";");
+        return;
+    }
+
+    if (consumir(parser, "try")) {
+        if (consumir(parser, "(")) {
+            while (!esta_no_fim(parser) && !lexema_e(parser, ")")) {
+                avancar(parser);
+            }
+            exigir(parser, ")");
+        }
+
+        parse_block(parser);
+
+        while (consumir(parser, "catch")) {
+            exigir(parser, "(");
+            parse_type(parser);
+            exigir_identificador(parser);
+            exigir(parser, ")");
+            parse_block(parser);
+        }
+
+        if (consumir(parser, "finally")) {
+            parse_block(parser);
+        }
+        return;
+    }
+
+    if (consumir(parser, "assert")) {
+        parse_expression(parser, 1);
+        if (consumir(parser, ":")) {
+            parse_expression(parser, 1);
+        }
+        exigir(parser, ";");
+        return;
+    }
+
+    if (parece_declaracao(parser)) {
+        parse_modifiers(parser);
+        parse_var_declaration(parser, 1);
+        return;
+    }
+
+    if (e_identificador(parser) && strcmp(lexema_relativo(parser, 1), ":") == 0) {
+        avancar(parser);
+        avancar(parser);
+        parse_statement(parser);
+        return;
+    }
+
+    parse_expression(parser, 1);
+    exigir(parser, ";");
+}
+
+static void parse_params(Parser *parser) {
+    exigir(parser, "(");
+
+    if (!lexema_e(parser, ")")) {
+        do {
+            parse_modifiers(parser);
+            parse_type(parser);
+            consumir(parser, "...");
+            exigir_identificador(parser);
+            while (consumir(parser, "[")) {
+                exigir(parser, "]");
+            }
+        } while (consumir(parser, ","));
+    }
+
+    exigir(parser, ")");
+}
+
+static void parse_member(Parser *parser, const char *nome_classe) {
+    parse_modifiers(parser);
+
+    if (lexema_e(parser, "}")) {
+        return;
+    }
+
+    if (consumir(parser, ";")) {
+        return;
+    }
+
+    if (lexema_e(parser, "class") ||
+        lexema_e(parser, "interface") ||
+        lexema_e(parser, "enum")) {
+        avancar(parser);
+        exigir_identificador(parser);
+        while (!esta_no_fim(parser) && !lexema_e(parser, "{")) {
+            avancar(parser);
+        }
+        if (lexema_e(parser, "{")) {
+            parse_block(parser);
+        }
+        return;
+    }
+
+    if (lexema_e(parser, "{")) {
+        parse_block(parser);
+        return;
+    }
+
+    if (e_identificador(parser) &&
+        strcmp(lexema_atual(parser), nome_classe) == 0 &&
+        strcmp(lexema_relativo(parser, 1), "(") == 0) {
+        avancar(parser);
+        parse_params(parser);
+        if (lexema_e(parser, "{")) {
+            parse_block(parser);
+        } else {
+            exigir(parser, ";");
+        }
+        return;
+    }
+
+    if (!inicia_tipo(parser)) {
+        registrar_erro_sintatico(parser, "Tipo ou membro esperado, encontrado '%s'", lexema_atual(parser));
+        avancar(parser);
+        return;
+    }
+
+    parse_type(parser);
+
+    if (!exigir_identificador(parser)) {
+        while (!esta_no_fim(parser) &&
+               !lexema_e(parser, ";") &&
+               !lexema_e(parser, "}")) {
+            avancar(parser);
+        }
+        consumir(parser, ";");
+        return;
+    }
+
+    if (lexema_e(parser, "(")) {
+        parse_params(parser);
+
+        if (consumir(parser, "throws")) {
+            parse_qualified_name(parser);
+            while (consumir(parser, ",")) {
+                parse_qualified_name(parser);
+            }
+        }
+
+        if (lexema_e(parser, "{")) {
+            parse_block(parser);
+        } else {
+            exigir(parser, ";");
+        }
+    } else {
+        parse_var_tail(parser);
+        exigir(parser, ";");
+    }
+}
+
+static void parse_class_decl(Parser *parser) {
+    int tipo = 0;
+    char nome[256] = "";
+    int contador = 0;
+
+    parse_modifiers(parser);
+
+    if (consumir(parser, "class")) {
+        tipo = 1;
+    } else if (consumir(parser, "interface")) {
+        tipo = 2;
+    } else if (consumir(parser, "enum")) {
+        tipo = 3;
+    } else {
+        registrar_erro_sintatico(parser, "Declaracao de classe, interface ou enum esperada");
+        avancar(parser);
+        return;
+    }
+
+    if (e_identificador(parser)) {
+        snprintf(nome, sizeof(nome), "%s", lexema_atual(parser));
+        avancar(parser);
+    } else {
+        exigir_identificador(parser);
+    }
+
+    parse_generic(parser);
+
+    if (consumir(parser, "extends")) {
+        parse_type(parser);
+        while (consumir(parser, ",")) {
+            parse_type(parser);
+        }
+    }
+
+    if (consumir(parser, "implements")) {
+        parse_type(parser);
+        while (consumir(parser, ",")) {
+            parse_type(parser);
+        }
+    }
+
+    if (!exigir(parser, "{")) {
+        return;
+    }
+
+    while (!esta_no_fim(parser) &&
+           !lexema_e(parser, "}") &&
+           contador++ < 100000) {
+        int posicao_inicial = parser->posicao;
+
+        if (tipo == 3 &&
+            e_identificador(parser) &&
+            (strcmp(lexema_relativo(parser, 1), ",") == 0 ||
+             strcmp(lexema_relativo(parser, 1), ";") == 0 ||
+             strcmp(lexema_relativo(parser, 1), "}") == 0)) {
+            avancar(parser);
+            if (!consumir(parser, ",")) {
+                consumir(parser, ";");
+            }
+            continue;
+        }
+
+        parse_member(parser, nome);
+
+        if (parser->posicao == posicao_inicial) {
+            avancar(parser);
+        }
+    }
+
+    exigir(parser, "}");
+}
+
+void analisar_sintaxe(const VetorTokens *tokens, ListaErrosSintaticos *erros) {
+    Parser parser;
+
+    memset(erros, 0, sizeof(*erros));
+
+    if (tokens->total == 0) {
+        return;
+    }
+
+    parser.tokens = tokens;
+    parser.posicao = 0;
+    parser.profundidade = 0;
+    parser.erros = erros;
+
+    if (consumir(&parser, "package")) {
+        parse_qualified_name(&parser);
+        exigir(&parser, ";");
+    }
+
+    while (consumir(&parser, "import")) {
+        consumir(&parser, "static");
+        exigir_identificador(&parser);
+
+        while (consumir(&parser, ".")) {
+            if (consumir(&parser, "*")) {
+                break;
+            }
+            exigir_identificador(&parser);
+        }
+
+        exigir(&parser, ";");
+    }
+
+    while (!esta_no_fim(&parser)) {
+        int posicao_inicial = parser.posicao;
+
+        if (consumir(&parser, ";")) {
+            continue;
+        }
+
+        parse_class_decl(&parser);
+
+        if (parser.posicao == posicao_inicial) {
+            avancar(&parser);
+        }
+    }
+}
+
+void erros_sintaticos_liberar(ListaErrosSintaticos *erros) {
+    free(erros->itens);
+    memset(erros, 0, sizeof(*erros));
+}
+
+/* A AST representa o subconjunto semantico, menor que a sintaxe reconhecida acima. */
+static char *copiar_texto_ast(const char *texto) {
+    size_t tamanho = strlen(texto) + 1;
+    char *copia = malloc(tamanho);
+    if (copia == NULL) {
+        exit(EXIT_FAILURE);
+    }
+    memcpy(copia, texto, tamanho);
+    return copia;
+}
+
+static int identificador_ast(Parser *parser) {
+    return token_atual(parser)->tipo == TOK_IDENTIFICADOR || lexema_e(parser, "String");
+}
+
+static int tipo_primitivo_ast(Parser *parser) {
+    return e_primitivo(parser) || lexema_e(parser, "String");
+}
+
+static void consumir_modificadores_ast(Parser *parser) {
+    const char *modificadores[] = {
+        "public", "private", "protected", "static", "final", "abstract", "volatile", "synchronized"
+    };
+    for (;;) {
+        int encontrado = 0;
+        for (size_t i = 0; i < sizeof(modificadores) / sizeof(modificadores[0]); i++) {
+            if (lexema_e(parser, modificadores[i])) {
+                encontrado = 1;
+                break;
+            }
+        }
+        if (!encontrado) {
+            return;
+        }
+        avancar(parser);
+    }
+}
+
+static char *ler_tipo_ast(Parser *parser) {
+    if (!tipo_primitivo_ast(parser) && !identificador_ast(parser)) {
+        registrar_erro_sintatico(parser, "Tipo esperado");
+        return copiar_texto_ast("?");
+    }
+
+    char tipo[256];
+    snprintf(tipo, sizeof(tipo), "%s", lexema_atual(parser));
+    avancar(parser);
+    while (lexema_e(parser, "[") && strcmp(lexema_relativo(parser, 1), "]") == 0) {
+        avancar(parser);
+        avancar(parser);
+        if (strlen(tipo) + 2 < sizeof(tipo)) {
+            strcat(tipo, "[]");
+        }
+    }
+    return copiar_texto_ast(tipo);
+}
+
+static AST *novo_no_atual(Parser *parser, NodeKind categoria, const char *texto, const char *tipo) {
+    const Token *token = token_atual(parser);
+    return ast_new(categoria, texto, tipo, token->linha, token->coluna);
+}
+
+static int precedencia_ast(const char *operador) {
+    static const PrecedenciaOperador operadores[] = {
+        {"=", 1}, {"+=", 1}, {"-=", 1}, {"*=", 1}, {"/=", 1},
+        {"||", 2}, {"&&", 3}, {"==", 4}, {"!=", 4},
+        {"<", 5}, {">", 5}, {"<=", 5}, {">=", 5},
+        {"+", 6}, {"-", 6}, {"*", 7}, {"/", 7}, {"%", 7}
+    };
+    for (size_t i = 0; i < sizeof(operadores) / sizeof(operadores[0]); i++) {
+        if (strcmp(operador, operadores[i].operador) == 0) {
+            return operadores[i].valor;
+        }
+    }
+    return 0;
+}
+
+static const char *tipo_literal_ast(const Token *token) {
+    size_t tamanho = strlen(token->lexema);
+    char sufixo = tamanho ? (char)tolower((unsigned char)token->lexema[tamanho - 1]) : 0;
+    switch (token->tipo) {
+        case TOK_LITERAL_INTEIRO: return sufixo == 'l' ? "long" : "int";
+        case TOK_LITERAL_DECIMAL: return sufixo == 'f' ? "float" : "double";
+        case TOK_LITERAL_TEXTO: return "String";
+        case TOK_LITERAL_CARACTERE: return "char";
+        case TOK_LITERAL_BOOLEANO: return "boolean";
+        default: return "null";
+    }
+}
+
+static AST *construir_expressao(Parser *parser, int precedencia_minima);
+static AST *construir_instrucao(Parser *parser);
+
+static void construir_argumentos(Parser *parser, AST *chamada) {
+    if (!lexema_e(parser, ")")) {
+        ast_add(chamada, construir_expressao(parser, 1));
+        while (consumir(parser, ",")) {
+            ast_add(chamada, construir_expressao(parser, 1));
+        }
+    }
+    exigir(parser, ")");
+}
+
+static AST *construir_primaria(Parser *parser) {
+    if (!entrar_regra(parser)) {
+        return novo_no_atual(parser, N_EMPTY, "erro", NULL);
+    }
+
+    const Token *token = token_atual(parser);
+    AST *no;
+    if (lexema_e(parser, "!") || lexema_e(parser, "-") || lexema_e(parser, "+") ||
+        lexema_e(parser, "++") || lexema_e(parser, "--")) {
+        no = novo_no_atual(parser, N_UNARY, token->lexema, NULL);
+        avancar(parser);
+        ast_add(no, construir_primaria(parser));
+    } else if (consumir(parser, "(")) {
+        no = construir_expressao(parser, 1);
+        exigir(parser, ")");
+    } else if (consumir(parser, "new")) {
+        no = ast_new(N_NEW, "new", NULL, token->linha, token->coluna);
+        no->type = ler_tipo_ast(parser);
+        if (consumir(parser, "(")) {
+            construir_argumentos(parser, no);
+        } else if (consumir(parser, "[")) {
+            if (!lexema_e(parser, "]")) {
+                ast_add(no, construir_expressao(parser, 1));
+            }
+            exigir(parser, "]");
+            char *tipo = realloc(no->type, strlen(no->type) + 3);
+            if (tipo == NULL) {
+                exit(EXIT_FAILURE);
+            }
+            no->type = tipo;
+            strcat(no->type, "[]");
+        }
+    } else if (e_literal(parser)) {
+        no = novo_no_atual(parser, N_LITERAL, token->lexema, tipo_literal_ast(token));
+        avancar(parser);
+    } else if (identificador_ast(parser) || lexema_e(parser, "this")) {
+        no = novo_no_atual(parser, N_IDENT, token->lexema, NULL);
+        avancar(parser);
+    } else {
+        registrar_erro_sintatico(parser, "Expressao invalida em '%s'", token->lexema);
+        no = novo_no_atual(parser, N_EMPTY, "erro", NULL);
+        avancar(parser);
+    }
+
+    while (!esta_no_fim(parser)) {
+        if (consumir(parser, ".")) {
+            if (!identificador_ast(parser)) {
+                registrar_erro_sintatico(parser, "Membro esperado");
+                break;
+            }
+            AST *membro = novo_no_atual(parser, N_MEMBER, lexema_atual(parser), NULL);
+            avancar(parser);
+            ast_add(membro, no);
+            no = membro;
+        } else if (consumir(parser, "(")) {
+            AST *chamada = novo_no_atual(parser, N_CALL, "chamada", NULL);
+            ast_add(chamada, no);
+            construir_argumentos(parser, chamada);
+            no = chamada;
+        } else if (consumir(parser, "[")) {
+            AST *indice = novo_no_atual(parser, N_INDEX, "[]", NULL);
+            ast_add(indice, no);
+            ast_add(indice, construir_expressao(parser, 1));
+            exigir(parser, "]");
+            no = indice;
+        } else if (lexema_e(parser, "++") || lexema_e(parser, "--")) {
+            AST *unario = novo_no_atual(parser, N_UNARY, lexema_atual(parser), NULL);
+            avancar(parser);
+            ast_add(unario, no);
+            no = unario;
+        } else {
+            break;
+        }
+    }
+    parser->profundidade--;
+    return no;
+}
+
+static AST *construir_expressao(Parser *parser, int precedencia_minima) {
+    if (!entrar_regra(parser)) {
+        return novo_no_atual(parser, N_EMPTY, "erro", NULL);
+    }
+    AST *esquerda = construir_primaria(parser);
+    while (!esta_no_fim(parser)) {
+        int nivel = precedencia_ast(lexema_atual(parser));
+        if (nivel < precedencia_minima) {
+            break;
+        }
+        AST *operacao = novo_no_atual(parser, nivel == 1 ? N_ASSIGN : N_BINARY,
+                                      lexema_atual(parser), NULL);
+        avancar(parser);
+        ast_add(operacao, esquerda);
+        ast_add(operacao, construir_expressao(parser, nivel + (nivel == 1 ? 0 : 1)));
+        esquerda = operacao;
+    }
+    parser->profundidade--;
+    return esquerda;
+}
+
+static AST *construir_bloco(Parser *parser) {
+    AST *bloco = novo_no_atual(parser, N_BLOCK, "{}", NULL);
+    exigir(parser, "{");
+    int contador = 0;
+    while (!esta_no_fim(parser) && !lexema_e(parser, "}") && contador++ < 10000) {
+        int posicao_inicial = parser->posicao;
+        ast_add(bloco, construir_instrucao(parser));
+        if (parser->posicao == posicao_inicial) {
+            avancar(parser);
+        }
+    }
+    exigir(parser, "}");
+    return bloco;
+}
+
+static AST *construir_variavel(Parser *parser) {
+    const Token *token = token_atual(parser);
+    char *tipo = ler_tipo_ast(parser);
+    AST *variavel = ast_new(N_VAR, NULL, tipo, token->linha, token->coluna);
+    free(tipo);
+    if (!identificador_ast(parser)) {
+        registrar_erro_sintatico(parser, "Nome de variavel esperado");
+        return variavel;
+    }
+    variavel->text = copiar_texto_ast(lexema_atual(parser));
+    avancar(parser);
+    if (consumir(parser, "=")) {
+        ast_add(variavel, construir_expressao(parser, 1));
+    }
+    return variavel;
+}
+
+static AST *construir_for(Parser *parser) {
+    AST *laco = novo_no_atual(parser, N_FOR, "for", NULL);
+    avancar(parser);
+    exigir(parser, "(");
+    if (lexema_e(parser, ";")) {
+        ast_add(laco, novo_no_atual(parser, N_EMPTY, "init", NULL));
+    } else if (tipo_primitivo_ast(parser)) {
+        ast_add(laco, construir_variavel(parser));
+    } else {
+        ast_add(laco, construir_expressao(parser, 1));
+    }
+    exigir(parser, ";");
+    ast_add(laco, lexema_e(parser, ";") ? novo_no_atual(parser, N_EMPTY, "cond", NULL)
+                                      : construir_expressao(parser, 1));
+    exigir(parser, ";");
+    ast_add(laco, lexema_e(parser, ")") ? novo_no_atual(parser, N_EMPTY, "passo", NULL)
+                                      : construir_expressao(parser, 1));
+    exigir(parser, ")");
+    ast_add(laco, construir_instrucao(parser));
+    return laco;
+}
+
+static AST *construir_instrucao_impl(Parser *parser);
+
+static AST *construir_instrucao(Parser *parser) {
+    if (!entrar_regra(parser)) {
+        return novo_no_atual(parser, N_EMPTY, "erro", NULL);
+    }
+    AST *instrucao = construir_instrucao_impl(parser);
+    parser->profundidade--;
+    return instrucao;
+}
+
+static AST *construir_instrucao_impl(Parser *parser) {
+    if (lexema_e(parser, "{")) {
+        return construir_bloco(parser);
+    }
+    if (consumir(parser, ";")) {
+        return novo_no_atual(parser, N_EMPTY, ";", NULL);
+    }
+    if (lexema_e(parser, "if") || lexema_e(parser, "while")) {
+        int condicional = lexema_e(parser, "if");
+        AST *no = novo_no_atual(parser, condicional ? N_IF : N_WHILE, lexema_atual(parser), NULL);
+        avancar(parser);
+        exigir(parser, "(");
+        ast_add(no, construir_expressao(parser, 1));
+        exigir(parser, ")");
+        ast_add(no, construir_instrucao(parser));
+        if (condicional && consumir(parser, "else")) {
+            ast_add(no, construir_instrucao(parser));
+        }
+        return no;
+    }
+    if (lexema_e(parser, "for")) {
+        return construir_for(parser);
+    }
+    if (lexema_e(parser, "return")) {
+        AST *retorno = novo_no_atual(parser, N_RETURN, "return", NULL);
+        avancar(parser);
+        if (!lexema_e(parser, ";")) {
+            ast_add(retorno, construir_expressao(parser, 1));
+        }
+        exigir(parser, ";");
+        return retorno;
+    }
+    if (lexema_e(parser, "break") || lexema_e(parser, "continue")) {
+        AST *no = novo_no_atual(parser, N_EMPTY, lexema_atual(parser), NULL);
+        avancar(parser);
+        exigir(parser, ";");
+        return no;
+    }
+
+    if (tipo_primitivo_ast(parser)) {
+        int posicao_inicial = parser->posicao;
+        avancar(parser);
+        while (consumir(parser, "[")) {
+            exigir(parser, "]");
+        }
+        int declaracao = identificador_ast(parser);
+        parser->posicao = posicao_inicial;
+        if (declaracao) {
+            AST *primeira = construir_variavel(parser);
+            AST *ultima = primeira;
+            while (consumir(parser, ",")) {
+                AST *variavel = novo_no_atual(parser, N_VAR, lexema_atual(parser), primeira->type);
+                avancar(parser);
+                if (consumir(parser, "=")) {
+                    ast_add(variavel, construir_expressao(parser, 1));
+                }
+                ultima->next = variavel;
+                ultima = variavel;
+            }
+            exigir(parser, ";");
+            return primeira;
+        }
+    }
+
+    AST *instrucao = novo_no_atual(parser, N_EXPR_STMT, "expressao", NULL);
+    ast_add(instrucao, construir_expressao(parser, 1));
+    exigir(parser, ";");
+    return instrucao;
+}
+
+static AST *construir_metodo(Parser *parser, const char *tipo, const char *nome,
+                             int linha, int coluna) {
+    AST *metodo = ast_new(N_METHOD, nome, tipo, linha, coluna);
+    exigir(parser, "(");
+    if (!lexema_e(parser, ")")) {
+        do {
+            const Token *token = token_atual(parser);
+            char *tipo_parametro = ler_tipo_ast(parser);
+            AST *parametro = ast_new(N_PARAM, identificador_ast(parser) ? lexema_atual(parser) : "?",
+                                     tipo_parametro, token->linha, token->coluna);
+            free(tipo_parametro);
+            if (identificador_ast(parser)) {
+                avancar(parser);
+            } else {
+                registrar_erro_sintatico(parser, "Parametro sem nome");
+            }
+            ast_add(metodo, parametro);
+        } while (consumir(parser, ","));
+    }
+    exigir(parser, ")");
+    if (lexema_e(parser, "{")) {
+        ast_add(metodo, construir_bloco(parser));
+    } else {
+        exigir(parser, ";");
+    }
+    return metodo;
+}
+
+static void construir_membro(Parser *parser, AST *classe) {
+    const Token *token = token_atual(parser);
+    char *tipo = ler_tipo_ast(parser);
+    if (!identificador_ast(parser)) {
+        registrar_erro_sintatico(parser, "Nome de membro esperado");
+        free(tipo);
+        avancar(parser);
+        return;
+    }
+
+    char *nome = copiar_texto_ast(lexema_atual(parser));
+    avancar(parser);
+    if (lexema_e(parser, "(")) {
+        ast_add(classe, construir_metodo(parser, tipo, nome, token->linha, token->coluna));
+    } else {
+        AST *campo = ast_new(N_VAR, nome, tipo, token->linha, token->coluna);
+        if (consumir(parser, "=")) {
+            ast_add(campo, construir_expressao(parser, 1));
+        }
+        ast_add(classe, campo);
+        while (consumir(parser, ",")) {
+            campo = novo_no_atual(parser, N_VAR, lexema_atual(parser), tipo);
+            avancar(parser);
+            if (consumir(parser, "=")) {
+                ast_add(campo, construir_expressao(parser, 1));
+            }
+            ast_add(classe, campo);
+        }
+        exigir(parser, ";");
+    }
+    free(nome);
+    free(tipo);
+}
+
+static int ast_dentro_limite(const AST *no, int nivel) {
+    if (no && nivel >= 128) {
+        return 0;
+    }
+    for (; no; no = no->next) {
+        if (!ast_dentro_limite(no->child, nivel + 1)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+AST *construir_ast(const VetorTokens *tokens, ListaErrosSintaticos *erros) {
+    memset(erros, 0, sizeof(*erros));
+    if (tokens->total == 0) {
+        return ast_new(N_PROGRAM, "Java", NULL, 1, 1);
+    }
+    Parser parser = {tokens, 0, 0, erros};
+    AST *raiz = novo_no_atual(&parser, N_PROGRAM, "Java", NULL);
+    while (!esta_no_fim(&parser)) {
+        if (consumir(&parser, "package") || consumir(&parser, "import")) {
+            while (!esta_no_fim(&parser) && !consumir(&parser, ";")) {
+                avancar(&parser);
+            }
+            continue;
+        }
+        consumir_modificadores_ast(&parser);
+        if (!consumir(&parser, "class")) {
+            registrar_erro_sintatico(&parser, "Classe esperada");
+            avancar(&parser);
+            continue;
+        }
+        AST *classe = novo_no_atual(&parser, N_CLASS, lexema_atual(&parser), NULL);
+        avancar(&parser);
+        ast_add(raiz, classe);
+        if (!exigir(&parser, "{")) {
+            break;
+        }
+
+        int contador = 0;
+        while (!esta_no_fim(&parser) && !lexema_e(&parser, "}") && contador++ < 10000) {
+            consumir_modificadores_ast(&parser);
+            if (consumir(&parser, ";")) {
+                continue;
+            }
+            if (lexema_e(&parser, "}")) {
+                break;
+            }
+            if (!tipo_primitivo_ast(&parser) && !identificador_ast(&parser)) {
+                registrar_erro_sintatico(&parser, "Membro de classe invalido");
+                avancar(&parser);
+                continue;
+            }
+            construir_membro(&parser, classe);
+        }
+        exigir(&parser, "}");
+    }
+    if (!ast_dentro_limite(raiz, 0)) {
+        registrar_erro_sintatico(&parser, "Limite de profundidade da AST excedido");
+    }
+    return raiz;
 }
